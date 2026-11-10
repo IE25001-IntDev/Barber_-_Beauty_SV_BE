@@ -1,0 +1,1 @@
+// Barber domain entity.
