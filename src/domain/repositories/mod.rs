@@ -3,7 +3,9 @@ use std::future::Future;
 use chrono::{DateTime, Utc};
 
 use crate::domain::entities::{
-    appointment::{Appointment, AppointmentStatus, NewAppointment, OperationTrace},
+    appointment::{
+        Appointment, AppointmentStatus, NewAppointment, OperationTrace, ScheduledAppointment,
+    },
     barber::Barber,
     service::Service,
 };
@@ -42,8 +44,14 @@ pub trait AppointmentRepository {
     fn insert(
         &self,
         appointment: Appointment,
+        duration_minutes: u32,
         trace: Option<&OperationTrace>,
     ) -> impl Future<Output = Result<Appointment, AppointmentInsertError>> + Send;
+
+    fn list_employee_schedule(
+        &self,
+        employee_id: &str,
+    ) -> impl Future<Output = Result<Vec<ScheduledAppointment>, RepositoryReadError>> + Send;
 
     fn find_by_id(
         &self,

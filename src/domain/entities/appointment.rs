@@ -60,3 +60,9 @@ pub struct AppointmentStatusChange {
     pub vu: Option<u64>,
     pub iteracion: Option<u64>,
 }
+
+pub struct ScheduledAppointment {
+    pub inicio: DateTime<Utc>,
+    pub servicio_id: String,
+    pub duracion_minutos: Option<u32>,
+}

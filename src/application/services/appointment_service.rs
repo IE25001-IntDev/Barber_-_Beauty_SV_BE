@@ -1,5 +1,6 @@
-use chrono::{NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::America::El_Salvador;
+use std::collections::HashMap;
 
 use crate::domain::{
     entities::appointment::{
@@ -63,6 +64,8 @@ pub enum CreateAppointmentError {
     InvalidTrace,
     EmployeeUnavailable,
     ServiceUnavailable,
+    InvalidDuration,
+    ScheduleConflict,
     Conflict,
     Repository(RepositoryReadError),
 }
@@ -97,6 +100,15 @@ pub async fn create_appointment(
         return Ok(appointment);
     }
 
+    if repository
+        .find_by_id(&request.id)
+        .await
+        .map_err(CreateAppointmentError::Repository)?
+        .is_some()
+    {
+        return Err(CreateAppointmentError::Conflict);
+    }
+
     catalog
         .find_employee(&request.empleado_id)
         .await
@@ -110,6 +122,16 @@ pub async fn create_appointment(
         .filter(|service| service.activo)
         .ok_or(CreateAppointmentError::ServiceUnavailable)?;
 
+    let end = appointment_end(request.inicio, service.duracion_minutos)
+        .ok_or(CreateAppointmentError::InvalidDuration)?;
+    let has_overlap =
+        employee_has_overlap(repository, catalog, &request, end, service.duracion_minutos)
+            .await
+            .map_err(CreateAppointmentError::Repository)?;
+    if has_overlap {
+        return Err(CreateAppointmentError::ScheduleConflict);
+    }
+
     let appointment = Appointment {
         id: request.id.clone(),
         cliente_nombre: request.cliente_nombre.clone(),
@@ -120,7 +142,12 @@ pub async fn create_appointment(
         precio_centavos: service.precio_centavos,
     };
 
-    match (repository.insert(appointment, trace.as_ref()).await, trace) {
+    match (
+        repository
+            .insert(appointment, service.duracion_minutos, trace.as_ref())
+            .await,
+        trace,
+    ) {
         (Err(AppointmentInsertError::Conflict), Some(trace)) => repository
             .find_creation(&request, &trace)
             .await
@@ -128,6 +155,52 @@ pub async fn create_appointment(
             .ok_or(CreateAppointmentError::Conflict),
         (result, _) => result.map_err(insert_error),
     }
+}
+
+async fn employee_has_overlap(
+    repository: &impl AppointmentRepository,
+    catalog: &impl AppointmentCatalog,
+    request: &NewAppointment,
+    end: DateTime<Utc>,
+    service_duration: u32,
+) -> Result<bool, RepositoryReadError> {
+    let schedule = repository
+        .list_employee_schedule(&request.empleado_id)
+        .await?;
+    let mut durations = HashMap::from([(request.servicio_id.as_str(), service_duration)]);
+    for entry in &schedule {
+        if entry.inicio >= end {
+            continue;
+        }
+
+        let duration = match entry.duracion_minutos {
+            Some(duration) => duration,
+            None => match durations.get(entry.servicio_id.as_str()) {
+                Some(&duration) => duration,
+                None => {
+                    let service = catalog
+                        .find_service(&entry.servicio_id)
+                        .await?
+                        .ok_or(RepositoryReadError::InvalidData)?;
+                    durations.insert(&entry.servicio_id, service.duracion_minutos);
+                    service.duracion_minutos
+                }
+            },
+        };
+        let existing_end =
+            appointment_end(entry.inicio, duration).ok_or(RepositoryReadError::InvalidData)?;
+        if request.inicio < existing_end {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn appointment_end(start: DateTime<Utc>, duration_minutes: u32) -> Option<DateTime<Utc>> {
+    if duration_minutes == 0 {
+        return None;
+    }
+    start.checked_add_signed(Duration::minutes(i64::from(duration_minutes)))
 }
 
 fn insert_error(error: AppointmentInsertError) -> CreateAppointmentError {

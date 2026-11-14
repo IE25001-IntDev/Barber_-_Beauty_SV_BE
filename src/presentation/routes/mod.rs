@@ -1,5 +1,8 @@
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use std::sync::Arc;
+
+use axum::{Extension, Json, Router, extract::State, http::StatusCode, routing::get};
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 
 use crate::{
     infrastructure::database::couchdb::CouchDb,
@@ -20,6 +23,7 @@ pub fn router(couchdb: CouchDb) -> Router {
         )
         .route("/api/empleados", get(catalog_controller::list_employees))
         .route("/api/servicios", get(catalog_controller::list_services))
+        .layer(Extension(Arc::new(Mutex::new(()))))
         .with_state(couchdb)
 }
 

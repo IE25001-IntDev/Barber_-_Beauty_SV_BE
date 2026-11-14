@@ -1,5 +1,5 @@
 use axum::{
-    Json,
+    Extension, Json,
     extract::{
         Path, Query, State,
         rejection::{JsonRejection, PathRejection, QueryRejection},
@@ -8,6 +8,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::{
     application::services::appointment_service::{
@@ -92,6 +94,7 @@ fn repository_error(error: RepositoryReadError) -> Response {
 
 pub async fn create(
     State(couchdb): State<CouchDb>,
+    Extension(creation_lock): Extension<Arc<Mutex<()>>>,
     body: Result<Json<NewAppointment>, JsonRejection>,
 ) -> Response {
     let request = match body {
@@ -101,7 +104,12 @@ pub async fn create(
 
     let repository = CouchDbAppointmentRepository(&couchdb);
     let catalog = CouchDbCatalogRepository(&couchdb);
-    let (status, code, message) = match create_appointment(&repository, &catalog, request).await {
+    // Serializa la lectura de disponibilidad y la inserción dentro de esta instancia.
+    let result = {
+        let _guard = creation_lock.lock().await;
+        create_appointment(&repository, &catalog, request).await
+    };
+    let (status, code, message) = match result {
         Ok(appointment) => return (StatusCode::CREATED, Json(appointment)).into_response(),
         Err(CreateAppointmentError::Repository(error)) => return repository_error(error),
         Err(CreateAppointmentError::InvalidFields) => (
@@ -119,6 +127,16 @@ pub async fn create(
             StatusCode::UNPROCESSABLE_ENTITY,
             "SERVICIO_NO_DISPONIBLE",
             "El servicio indicado debe existir y estar activo.",
+        ),
+        Err(CreateAppointmentError::InvalidDuration) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "DURACION_CITA_INVALIDA",
+            "La duración del servicio debe ser positiva y permitir calcular el fin de la cita.",
+        ),
+        Err(CreateAppointmentError::ScheduleConflict) => (
+            StatusCode::CONFLICT,
+            "HORARIO_NO_DISPONIBLE",
+            "El empleado ya tiene una cita que coincide con el horario solicitado.",
         ),
         Err(CreateAppointmentError::Conflict) => (
             StatusCode::CONFLICT,

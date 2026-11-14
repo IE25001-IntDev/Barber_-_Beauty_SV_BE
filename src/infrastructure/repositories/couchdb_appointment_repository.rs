@@ -5,7 +5,9 @@ use serde_json::{Value, json};
 
 use crate::{
     domain::{
-        entities::appointment::{Appointment, AppointmentStatus, NewAppointment, OperationTrace},
+        entities::appointment::{
+            Appointment, AppointmentStatus, NewAppointment, OperationTrace, ScheduledAppointment,
+        },
         repositories::{
             AppointmentInsertError, AppointmentRepository, AppointmentUpdateError,
             RepositoryReadError,
@@ -28,6 +30,13 @@ struct AppointmentDocument {
     precio_centavos: u64,
     #[serde(default)]
     creacion: Option<OperationTrace>,
+}
+
+#[derive(Deserialize)]
+struct ScheduleDocument {
+    inicio: DateTime<Utc>,
+    servicio_id: String,
+    duracion_minutos: Option<u32>,
 }
 
 impl From<AppointmentDocument> for Appointment {
@@ -161,6 +170,7 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
     async fn insert(
         &self,
         appointment: Appointment,
+        duration_minutes: u32,
         trace: Option<&OperationTrace>,
     ) -> Result<Appointment, AppointmentInsertError> {
         let mut document = json!({
@@ -170,6 +180,7 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
             "servicio_id": appointment.servicio_id,
             "inicio": appointment.inicio,
             "estado": appointment.estado,
+            "duracion_minutos": duration_minutes,
             "precio_centavos": appointment.precio_centavos
         });
         if let Some(trace) = trace {
@@ -189,6 +200,33 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
             _ => Err(AppointmentInsertError::Read(
                 RepositoryReadError::Unavailable,
             )),
+        }
+    }
+
+    async fn list_employee_schedule(
+        &self,
+        employee_id: &str,
+    ) -> Result<Vec<ScheduledAppointment>, RepositoryReadError> {
+        let mut query = CouchDb::paged_query(json!({
+            "empleado_id": {"$eq": employee_id},
+            "estado": {"$in": ["pendiente", "completada"]},
+            "cliente_nombre": {"$exists": true},
+            "servicio_id": {"$exists": true}
+        }));
+        query["fields"] = json!(["inicio", "servicio_id", "duracion_minutos"]);
+
+        let mut schedule = Vec::new();
+        loop {
+            let page = self.0.find_page::<ScheduleDocument>(&query).await?;
+            let has_more = page.advance(&mut query)?;
+            schedule.extend(page.docs.into_iter().map(|doc| ScheduledAppointment {
+                inicio: doc.inicio,
+                servicio_id: doc.servicio_id,
+                duracion_minutos: doc.duracion_minutos,
+            }));
+            if !has_more {
+                return Ok(schedule);
+            }
         }
     }
 
