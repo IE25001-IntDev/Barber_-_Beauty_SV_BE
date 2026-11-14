@@ -13,13 +13,17 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from threading import Thread
 
 RAIZ = Path(__file__).resolve().parents[1]
 COMPOSE = ["docker", "compose", "--env-file", ".env", "-f", "compose.yaml"]
 LOCAL = ["--env-file", ".env.local", "-f", "compose.local.yaml"]
 REPLICACION = [*COMPOSE, *LOCAL, "--profile", "replicacion"]
+RUTA_API = "/api/ready"
 
 
 def preparar_entorno(nombre, variable):
@@ -332,13 +336,85 @@ def probar_corte(segundos):
     print("Prueba de recuperación local → central completada.")
 
 
+@contextmanager
+def enlace_api(puerto_api, puerto_enlace=0):
+    class Intermediario(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != RUTA_API:
+                self.send_error(404)
+                return
+            try:
+                codigo, cuerpo = solicitud(puerto_api, "GET", RUTA_API, timeout=4)
+            except (OSError, http.client.HTTPException):
+                self.send_error(502, "API inaccesible")
+                return
+            self.send_response(codigo)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(cuerpo)))
+            self.end_headers()
+            self.wfile.write(cuerpo)
+
+        def log_message(self, formato, *argumentos):
+            pass
+
+    with HTTPServer(("127.0.0.1", puerto_enlace), Intermediario) as servidor:
+        hilo = Thread(target=servidor.serve_forever, kwargs={"poll_interval": 0.05})
+        hilo.start()
+        try:
+            yield servidor.server_port
+        finally:
+            servidor.shutdown()
+            hilo.join()
+
+
+def verificar_api(puerto, tramo):
+    codigo, cuerpo = solicitud(puerto, "GET", RUTA_API, timeout=5)
+    if codigo != 200 or json.loads(cuerpo).get("status") != "ok":
+        raise RuntimeError(f"{tramo}: se esperaba HTTP 200 con status ok. HTTP recibido: {codigo}.")
+
+
+def verificar_corte_api(puerto):
+    try:
+        solicitud(puerto, "GET", RUTA_API)
+    except ConnectionRefusedError:
+        return
+    raise RuntimeError("El puerto del enlace siguió aceptando conexiones durante el corte.")
+
+
+def probar_corte_api(puerto_api, segundos):
+    verificar_api(puerto_api, "Acceso directo a la API")
+    with enlace_api(puerto_api) as puerto_enlace:
+        verificar_api(puerto_enlace, "Enlace cliente → API")
+        print(f"Antes del corte: HTTP 200 a través del puerto {puerto_enlace}.", flush=True)
+
+    inicio = time.monotonic()
+    print(f"{datetime.now(timezone.utc).isoformat()} Enlace cliente → API interrumpido.", flush=True)
+    verificar_corte_api(puerto_enlace)
+    verificar_api(puerto_api, "Acceso directo durante el corte")
+    print("Durante el corte: conexión rechazada en el enlace y HTTP 200 directo a la API.", flush=True)
+    time.sleep(max(0, segundos - (time.monotonic() - inicio)))
+    verificar_corte_api(puerto_enlace)
+    verificar_api(puerto_api, "Acceso directo al finalizar el corte")
+
+    with enlace_api(puerto_api, puerto_enlace):
+        restablecido = time.monotonic()
+        print(f"{datetime.now(timezone.utc).isoformat()} Enlace cliente → API restablecido.", flush=True)
+        verificar_api(puerto_enlace, "Enlace cliente → API recuperado")
+        print(f"Después del corte: HTTP 200. Primera consulta: {time.monotonic() - restablecido:.3f} s.")
+    print("Prueba de corte cliente → API completada.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modos = parser.add_mutually_exclusive_group()
     modos.add_argument("--local", action="store_true", help="Inicia la instancia del laboratorio.")
     modos.add_argument("--replicar-prueba", action="store_true", help="Replica un documento ficticio.")
     modos.add_argument("--probar-corte", action="store_true", help="Prueba recuperación tras un corte de 60 segundos.")
+    modos.add_argument("--probar-corte-api", action="store_true", help="Interrumpe el enlace cliente → API durante 60 segundos.")
+    parser.add_argument("--puerto-api", type=int, default=18080, help="Puerto local de Rust para --probar-corte-api.")
     args = parser.parse_args()
+    if not 1 <= args.puerto_api <= 65535:
+        parser.error("--puerto-api debe estar entre 1 y 65535.")
 
     if args.local:
         compose, servicio = [*COMPOSE, *LOCAL], "couchdb-local"
@@ -352,6 +428,8 @@ def main():
             replicar_prueba()
         elif args.probar_corte:
             probar_corte(60)
+        elif args.probar_corte_api:
+            probar_corte_api(args.puerto_api, 60)
         else:
             iniciar(compose, servicio, archivo_env, variable)
     except FileNotFoundError as error:
@@ -370,7 +448,8 @@ def main():
         print("Prueba interrumpida.", file=sys.stderr)
         sys.exit(130)
     except (OSError, RuntimeError, ValueError, http.client.HTTPException) as error:
-        print(f"No se pudo verificar CouchDB. {error}", file=sys.stderr)
+        componente = "el enlace cliente → API" if args.probar_corte_api else "CouchDB"
+        print(f"No se pudo verificar {componente}. {error}", file=sys.stderr)
         sys.exit(1)
 
 

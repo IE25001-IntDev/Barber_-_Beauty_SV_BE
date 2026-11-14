@@ -116,6 +116,18 @@ docker --context desktop-linux compose --env-file .env --env-file .env.local \
   -f compose.yaml -f compose.local.yaml --profile replicacion start enlace-replicacion
 ```
 
+### Corte del enlace cliente → API
+
+Con CouchDB central y el backend Rust activos, ejecuta en otra terminal:
+
+```bash
+python3 scripts/iniciar-couchdb.py --probar-corte-api
+```
+
+La prueba inicia un intermediario HTTP temporal en `127.0.0.1` y usa `GET /api/ready` como solicitud del cliente. Comprueba que el intermediario devuelve HTTP 200, lo detiene durante 60 segundos y verifica que las conexiones a ese puerto son rechazadas al inicio y al final del corte. La ruta directa a Rust debe devolver HTTP 200 en ambas comprobaciones durante la interrupción. Después abre el intermediario en el mismo puerto y confirma que vuelve a responder con HTTP 200. El script registra las marcas UTC y el tiempo de la primera consulta después de restablecer el enlace.
+
+Si Rust usa otro puerto, añade `--puerto-api` con su valor. El intermediario se ejecuta en el mismo equipo que Rust y se cierra al terminar el comando. Esta prueba usa el endpoint de disponibilidad y deja para la ejecución integrada el corte simultáneo del enlace de replicación y la comprobación de las operaciones de negocio recuperadas por Rust.
+
 - [Contrato de API](CONTRATO_API.md)
 - [Instalación en Docker](https://docs.couchdb.org/en/stable/install/docker.html)
 - [Configuración de CouchDB en nodo único](https://docs.couchdb.org/en/stable/setup/single-node.html)
