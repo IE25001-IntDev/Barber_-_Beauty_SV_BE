@@ -1,0 +1,25 @@
+services:
+  couchdb-local:
+    build:
+      context: ./couchdb
+    environment:
+      COUCHDB_USER: "${COUCHDB_LOCAL_USER:?Define COUCHDB_LOCAL_USER en .env.local}"
+      COUCHDB_PASSWORD: "${COUCHDB_LOCAL_PASSWORD:?Define COUCHDB_LOCAL_PASSWORD en .env.local}"
+      COUCHDB_DATABASE: "${COUCHDB_LOCAL_DATABASE:-barberia_citas}"
+    ports:
+      - "127.0.0.1:${COUCHDB_LOCAL_PORT:-15987}:5984"
+    volumes:
+      - couchdb_local_data:/opt/couchdb/data
+    mem_limit: 384m
+    cpus: 1.0
+
+  enlace-replicacion:
+    image: haproxy:3.2-alpine
+    profiles: [replicacion]
+    volumes:
+      - ./couchdb/enlace-replicacion.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    mem_limit: 64m
+    stop_signal: SIGTERM
+
+volumes:
+  couchdb_local_data:

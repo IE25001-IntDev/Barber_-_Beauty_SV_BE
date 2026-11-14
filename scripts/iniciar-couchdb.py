@@ -1,93 +1,43 @@
 #!/usr/bin/env python3
-"""Levanta CouchDB central y comprueba la base de la aplicación."""
+"""Inicia CouchDB o prueba una replicación del laboratorio."""
 
-import base64
+import argparse
 import http.client
 import json
-import os
-import re
-import secrets
 import subprocess
 import sys
-import tempfile
 import time
-from pathlib import Path
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 
-RAIZ = Path(__file__).resolve().parents[1]
+from couchdb_comun import (
+    RAIZ,
+    esperar_couchdb,
+    extremo_replicacion,
+    parametros,
+    preparar_entorno,
+    servicios_compose,
+    solicitud,
+    verificar_base,
+)
+
 COMPOSE = ["docker", "compose", "--env-file", ".env", "-f", "compose.yaml"]
+LOCAL = ["--env-file", ".env.local", "-f", "compose.local.yaml"]
+REPLICACION = [*COMPOSE, *LOCAL, "--profile", "replicacion"]
+RUTA_API = "/api/ready"
 
 
-def preparar_entorno():
-    destino = RAIZ / ".env"
-    if destino.exists():
-        return
+def iniciar(compose, servicio, archivo_env, variable):
+    if servicio == "couchdb-local" and not (RAIZ / ".env").is_file():
+        raise RuntimeError("Configura primero CouchDB central para crear .env.")
 
-    plantilla = (RAIZ / ".env.example").read_text(encoding="utf-8")
-    contenido = plantilla.replace(
-        "COUCHDB_PASSWORD=\n", f"COUCHDB_PASSWORD={secrets.token_hex(24)}\n", 1
-    )
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=RAIZ) as temporal:
-        temporal.write(contenido)
-        temporal.flush()
-        try:
-            os.link(temporal.name, destino)
-        except FileExistsError:
-            return
-    print("Archivo .env local creado con una contraseña aleatoria.", flush=True)
+    preparar_entorno(archivo_env, variable)
+    puerto, base, credencial = parametros(servicios_compose(compose)[servicio])
 
-
-def solicitud(puerto, metodo, ruta, credencial=None):
-    encabezados = {"Accept": "application/json"}
-    if credencial is not None:
-        encabezados["Authorization"] = f"Basic {credencial}"
-
-    conexion = http.client.HTTPConnection("127.0.0.1", puerto, timeout=2)
-    try:
-        conexion.request(metodo, ruta, headers=encabezados)
-        respuesta = conexion.getresponse()
-        return respuesta.status, respuesta.read()
-    finally:
-        conexion.close()
-
-
-def esperar_couchdb(puerto):
-    limite = time.monotonic() + 60
-    while time.monotonic() < limite:
-        try:
-            codigo, cuerpo = solicitud(puerto, "GET", "/_up")
-            if codigo == 200 and json.loads(cuerpo).get("status") == "ok":
-                return
-        except (OSError, http.client.HTTPException, ValueError):
-            pass
-        time.sleep(1)
-    raise RuntimeError("CouchDB no indicó que estuviera listo en 60 segundos.")
-
-
-def main():
-    preparar_entorno()
-    resultado = subprocess.run(
-        [*COMPOSE, "config", "--format", "json"],
-        cwd=RAIZ,
-        check=True,
-        stdout=subprocess.PIPE,
-    )
-    servicio = json.loads(resultado.stdout)["services"]["couchdb"]
-    entorno = servicio["environment"]
-    base = entorno["COUCHDB_DATABASE"]
-    if not re.fullmatch(r"[a-z][a-z0-9_-]*", base):
-        raise RuntimeError(
-            "COUCHDB_DATABASE debe empezar con una letra minúscula "
-            "y usar letras minúsculas, números, guiones o guiones bajos."
-        )
-
-    puerto = int(servicio["ports"][0]["published"])
-    usuario = entorno["COUCHDB_USER"]
-    clave = entorno["COUCHDB_PASSWORD"]
-    if ":" in usuario:
-        raise RuntimeError("COUCHDB_USER no puede contener dos puntos.")
-    credencial = base64.b64encode(f"{usuario}:{clave}".encode("utf-8")).decode("ascii")
-
-    subprocess.run([*COMPOSE, "up", "-d", "--build", "couchdb"], cwd=RAIZ, check=True)
+    subprocess.run([*compose, "up", "-d", "--build", servicio], cwd=RAIZ, check=True)
     esperar_couchdb(puerto)
 
     codigo, cuerpo = solicitud(puerto, "PUT", f"/{base}", credencial)
@@ -96,34 +46,344 @@ def main():
     ):
         raise RuntimeError(f"CouchDB respondió HTTP {codigo} al preparar la base.")
 
-    codigo, cuerpo = solicitud(puerto, "GET", f"/{base}", credencial)
-    if codigo != 200 or json.loads(cuerpo).get("db_name") != base:
-        raise RuntimeError(f"La consulta autenticada de la base falló (HTTP {codigo}).")
+    instancia = "CouchDB local" if servicio == "couchdb-local" else "CouchDB"
+    verificar_base(puerto, base, credencial, instancia)
 
     codigo, _ = solicitud(puerto, "GET", f"/{base}")
     if codigo not in (401, 403):
         raise RuntimeError(f"La base respondió HTTP {codigo} a una consulta sin credenciales.")
 
-    print(f"CouchDB listo. Base: {base}. Consulta autenticada: HTTP 200.")
+    print(f"{instancia} listo. Base: {base}. Consulta autenticada: HTTP 200.")
     print(f"Fauxton: http://127.0.0.1:{puerto}/_utils/")
 
 
-if __name__ == "__main__":
+def instancias_replicacion():
+    servicios = servicios_compose([*COMPOSE, *LOCAL])
+    local = servicios["couchdb-local"]
+    central = servicios["couchdb"]
+    origen = parametros(local)
+    destino = parametros(central)
+    if origen[0] == destino[0]:
+        raise RuntimeError("Las dos instancias deben usar puertos publicados distintos.")
+    verificar_base(*origen, "CouchDB local")
+    verificar_base(*destino, "CouchDB central")
+    return local, central, origen, destino
+
+
+def guardar_prueba(instancia, doc_id, op_id):
+    puerto, base, credencial = instancia
+    documento = {"tipo": "prueba_replicacion", "op_id": op_id}
+    codigo, cuerpo = solicitud(
+        puerto, "PUT", f"/{base}/{doc_id}", credencial, datos=documento
+    )
+    if codigo not in (201, 202):
+        raise RuntimeError(f"Falló la escritura del documento local (HTTP {codigo}).")
+    guardado = json.loads(cuerpo)
+    revision = guardado.get("rev")
+    if guardado.get("ok") is not True or guardado.get("id") != doc_id or not revision:
+        raise RuntimeError("CouchDB local no confirmó el ID y la revisión del documento.")
+    print(f"Local: documento creado con HTTP {codigo}.", flush=True)
+    return {**documento, "_id": doc_id, "_rev": revision}
+
+
+def leer_prueba(instancia, doc_id):
+    puerto, base, credencial = instancia
+    return solicitud(puerto, "GET", f"/{base}/{doc_id}", credencial)
+
+
+def replicar_prueba():
+    local, central, origen, destino = instancias_replicacion()
+    puerto_local, base_local, credencial_local = origen
+    _, base_central, _ = destino
+    op_id = str(uuid.uuid4())
+    doc_id = f"prueba-replicacion-{op_id}"
+    esperado = guardar_prueba(origen, doc_id, op_id)
+
+    codigo, _ = leer_prueba(destino, doc_id)
+    if codigo != 404:
+        raise RuntimeError(f"CouchDB central debía devolver HTTP 404 y devolvió {codigo}.")
+    print(f"Central antes de replicar: HTTP 404 para {doc_id}.", flush=True)
+
+    codigo, cuerpo = solicitud(
+        puerto_local,
+        "POST",
+        "/_replicate",
+        credencial_local,
+        datos={
+            "source": extremo_replicacion("couchdb-local", base_local, local),
+            "target": extremo_replicacion("couchdb", base_central, central),
+            "doc_ids": [doc_id],
+            "continuous": False,
+            "create_target": False,
+        },
+        timeout=45,
+    )
+    if codigo != 200 or json.loads(cuerpo).get("ok") is not True:
+        raise RuntimeError(f"CouchDB no confirmó la replicación (HTTP {codigo}).")
+
+    codigo, cuerpo = leer_prueba(destino, doc_id)
+    if codigo != 200 or json.loads(cuerpo) != esperado:
+        raise RuntimeError(f"El documento central no coincide con el original (HTTP {codigo}).")
+    print("Central después de replicar: HTTP 200, mismo ID, revisión y contenido.")
+    print("Prueba de replicación local → central completada.")
+
+
+def esperar_documento(instancia, esperado, segundos):
+    limite = time.monotonic() + segundos
+    while True:
+        codigo, cuerpo = leer_prueba(instancia, esperado["_id"])
+        if codigo == 200 and json.loads(cuerpo) == esperado:
+            return
+        if codigo != 404:
+            raise RuntimeError(f"La revisión o el contenido no coinciden, o falló la lectura (HTTP {codigo}).")
+        restante = limite - time.monotonic()
+        if restante <= 0:
+            raise RuntimeError(f"La base no devolvió el documento en {segundos} segundos.")
+        time.sleep(min(1, restante))
+
+
+def operar_enlace(*argumentos):
+    subprocess.run(
+        [*REPLICACION, *argumentos, "enlace-replicacion"],
+        cwd=RAIZ, check=True, timeout=120,
+    )
+
+
+def verificar_enlace():
+    # Consulta desde el mismo contenedor que inicia la replicación.
+    prueba = r'''
+exec 3<>/dev/tcp/enlace-replicacion/5984 || exit 1
+printf 'GET /_up HTTP/1.1\r\nHost: enlace-replicacion\r\nConnection: close\r\n\r\n' >&3
+read -r protocolo codigo resto <&3 && [[ "$protocolo" == HTTP/* && "$codigo" == 200 ]]
+'''
+    for _ in range(5):
+        resultado = subprocess.run(
+            [*REPLICACION, "exec", "-T", "couchdb-local", "timeout", "3", "bash", "-c", prueba],
+            cwd=RAIZ, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8,
+        )
+        if resultado.returncode == 0:
+            print("Enlace de replicación verificado desde CouchDB local: HTTP 200.", flush=True)
+            return
+        time.sleep(1)
+
+    operar_enlace("ps", "-a")
+    operar_enlace("logs", "--tail=12")
+    raise RuntimeError("CouchDB local no pudo obtener HTTP 200 a través del enlace de replicación.")
+
+
+def probar_corte(segundos, *, puerto_api=None):
+    if puerto_api is not None:
+        verificar_api(puerto_api, "Acceso directo a la API")
+
+    local, central, origen, destino = instancias_replicacion()
+    puerto_local, base_local, credencial_local = origen
+    _, base_central, _ = destino
+    op_control, op_corte = str(uuid.uuid4()), str(uuid.uuid4())
+    id_control = f"prueba-replicacion-{op_control}"
+    id_corte = f"prueba-replicacion-{op_corte}"
+    trabajo = {
+        "source": extremo_replicacion("couchdb-local", base_local, local),
+        "target": extremo_replicacion("enlace-replicacion", base_central, central),
+        "doc_ids": [id_control, id_corte],
+        "continuous": True,
+        "create_target": False,
+        # El trabajo transitorio debe seguir reintentando durante el corte de 60 s.
+        "retries_per_request": 10,
+    }
+    operar_enlace("up", "-d", "--no-deps")
+    verificar_enlace()
+
     try:
-        main()
+        codigo, cuerpo = solicitud(
+            puerto_local, "POST", "/_replicate", credencial_local, datos=trabajo, timeout=15
+        )
+        if codigo != 202 or json.loads(cuerpo).get("ok") is not True:
+            raise RuntimeError(f"CouchDB no aceptó la replicación continua (HTTP {codigo}).")
+
+        control = guardar_prueba(origen, id_control, op_control)
+        esperar_documento(destino, control, 45)
+        print("Antes del corte: documento de control confirmado en central.", flush=True)
+
+        puerto_cliente = None
+        if puerto_api is not None:
+            with enlace_api(puerto_api) as puerto_cliente:
+                verificar_api(puerto_cliente, "Enlace cliente → API antes del corte")
+                print("Antes del corte: HTTP 200 a través del enlace cliente → API.", flush=True)
+
+        try:
+            operar_enlace("stop", "--timeout", "2")
+            inicio = time.monotonic()
+            enlaces = "Ambos enlaces" if puerto_cliente is not None else "Enlace de replicación"
+            print(f"{datetime.now(timezone.utc).isoformat()} {enlaces}: inicio del corte.", flush=True)
+            if puerto_cliente is not None:
+                verificar_corte_api(puerto_cliente)
+                verificar_api(puerto_api, "Acceso directo durante el corte")
+                print("Durante el corte: enlace cliente → API inaccesible, Rust directo HTTP 200.", flush=True)
+            pendiente = guardar_prueba(origen, id_corte, op_corte)
+            esperar_documento(origen, pendiente, 5)
+            codigo, _ = leer_prueba(destino, id_corte)
+            if codigo != 404:
+                raise RuntimeError(f"Durante el corte se esperaba HTTP 404 y se obtuvo {codigo}.")
+            print(f"Durante el corte: local HTTP 200 y central HTTP 404 para {id_corte}.", flush=True)
+            time.sleep(max(0, segundos - (time.monotonic() - inicio)))
+            if puerto_cliente is not None:
+                verificar_corte_api(puerto_cliente)
+        finally:
+            operar_enlace("start")
+
+        recuperado = time.monotonic()
+        print(f"{datetime.now(timezone.utc).isoformat()} Enlace restablecido.", flush=True)
+        if puerto_cliente is not None:
+            with enlace_api(puerto_api, puerto_cliente):
+                verificar_api(puerto_cliente, "Enlace cliente → API recuperado")
+                print("Después del corte: enlace cliente → API HTTP 200.", flush=True)
+        esperar_documento(destino, pendiente, 120)
+        print(f"Central: HTTP 200, misma revisión y contenido. Recuperación: {time.monotonic() - recuperado:.2f} s.")
+    finally:
+        fallo_prueba = sys.exc_info()[0] is not None
+        try:
+            codigo, _ = solicitud(
+                puerto_local,
+                "POST",
+                "/_replicate",
+                credencial_local,
+                datos={**trabajo, "cancel": True},
+                timeout=10,
+            )
+            if codigo not in (200, 404):
+                raise RuntimeError(f"No se pudo cancelar la replicación de prueba (HTTP {codigo}).")
+        except (OSError, RuntimeError, http.client.HTTPException) as error:
+            if not fallo_prueba:
+                raise
+            print(f"No se confirmó la cancelación de la replicación: {error}", file=sys.stderr)
+
+    print(
+        "Ensayo E4 de infraestructura completado."
+        if puerto_api is not None else "Prueba de recuperación local → central completada."
+    )
+
+
+@contextmanager
+def enlace_api(puerto_api, puerto_enlace=0):
+    class Intermediario(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != RUTA_API:
+                self.send_error(404)
+                return
+            try:
+                codigo, cuerpo = solicitud(puerto_api, "GET", RUTA_API, timeout=4)
+            except (OSError, http.client.HTTPException):
+                self.send_error(502, "API inaccesible")
+                return
+            self.send_response(codigo)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(cuerpo)))
+            self.end_headers()
+            self.wfile.write(cuerpo)
+
+        def log_message(self, formato, *argumentos):
+            pass
+
+    with HTTPServer(("127.0.0.1", puerto_enlace), Intermediario) as servidor:
+        hilo = Thread(target=servidor.serve_forever, kwargs={"poll_interval": 0.05})
+        hilo.start()
+        try:
+            yield servidor.server_port
+        finally:
+            servidor.shutdown()
+            hilo.join()
+
+
+def verificar_api(puerto, tramo):
+    codigo, cuerpo = solicitud(puerto, "GET", RUTA_API, timeout=5)
+    if codigo != 200 or json.loads(cuerpo).get("status") != "ok":
+        raise RuntimeError(f"{tramo}: se esperaba HTTP 200 con status ok. HTTP recibido: {codigo}.")
+
+
+def verificar_corte_api(puerto):
+    try:
+        solicitud(puerto, "GET", RUTA_API)
+    except ConnectionRefusedError:
+        return
+    raise RuntimeError("El puerto del enlace siguió aceptando conexiones durante el corte.")
+
+
+def probar_corte_api(puerto_api, segundos):
+    verificar_api(puerto_api, "Acceso directo a la API")
+    with enlace_api(puerto_api) as puerto_enlace:
+        verificar_api(puerto_enlace, "Enlace cliente → API")
+        print(f"Antes del corte: HTTP 200 a través del puerto {puerto_enlace}.", flush=True)
+
+    inicio = time.monotonic()
+    print(f"{datetime.now(timezone.utc).isoformat()} Enlace cliente → API interrumpido.", flush=True)
+    verificar_corte_api(puerto_enlace)
+    verificar_api(puerto_api, "Acceso directo durante el corte")
+    print("Durante el corte: conexión rechazada en el enlace y HTTP 200 directo a la API.", flush=True)
+    time.sleep(max(0, segundos - (time.monotonic() - inicio)))
+    verificar_corte_api(puerto_enlace)
+    verificar_api(puerto_api, "Acceso directo al finalizar el corte")
+
+    with enlace_api(puerto_api, puerto_enlace):
+        restablecido = time.monotonic()
+        print(f"{datetime.now(timezone.utc).isoformat()} Enlace cliente → API restablecido.", flush=True)
+        verificar_api(puerto_enlace, "Enlace cliente → API recuperado")
+        print(f"Después del corte: HTTP 200. Primera consulta: {time.monotonic() - restablecido:.3f} s.")
+    print("Prueba de corte cliente → API completada.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    modos = parser.add_mutually_exclusive_group()
+    modos.add_argument("--local", action="store_true", help="Inicia la instancia del laboratorio.")
+    modos.add_argument("--replicar-prueba", action="store_true", help="Replica un documento ficticio.")
+    modos.add_argument("--probar-corte", action="store_true", help="Prueba recuperación tras un corte de 60 segundos.")
+    modos.add_argument("--probar-corte-api", action="store_true", help="Interrumpe el enlace cliente → API durante 60 segundos.")
+    modos.add_argument("--probar-e4", action="store_true", help="Prueba ambos enlaces durante un corte común de 60 segundos.")
+    parser.add_argument("--puerto-api", type=int, default=18080, help="Puerto local de Rust para --probar-corte-api y --probar-e4.")
+    args = parser.parse_args()
+    if not 1 <= args.puerto_api <= 65535:
+        parser.error("--puerto-api debe estar entre 1 y 65535.")
+
+    if args.local:
+        compose, servicio = [*COMPOSE, *LOCAL], "couchdb-local"
+        archivo_env, variable = ".env.local", "COUCHDB_LOCAL_PASSWORD"
+    else:
+        compose, servicio = COMPOSE, "couchdb"
+        archivo_env, variable = ".env", "COUCHDB_PASSWORD"
+
+    try:
+        if args.replicar_prueba:
+            replicar_prueba()
+        elif args.probar_corte:
+            probar_corte(60)
+        elif args.probar_corte_api:
+            probar_corte_api(args.puerto_api, 60)
+        elif args.probar_e4:
+            probar_corte(60, puerto_api=args.puerto_api)
+        else:
+            iniciar(compose, servicio, archivo_env, variable)
     except FileNotFoundError as error:
         if error.filename == "docker":
             print("Docker no está disponible en esta terminal.", file=sys.stderr)
         else:
             print(f"Falta un archivo requerido: {error.filename}", file=sys.stderr)
         sys.exit(1)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print(
-            "Falló Docker Compose. Revisa el mensaje de Docker y ejecuta "
-            "`docker compose logs --tail=60 couchdb` si el servicio llegó a iniciarse.",
+            "Falló Docker Compose. Revisa el mensaje de Docker.",
             file=sys.stderr,
         )
         sys.exit(1)
+    except KeyboardInterrupt:
+        print("Prueba interrumpida.", file=sys.stderr)
+        sys.exit(130)
     except (OSError, RuntimeError, ValueError, http.client.HTTPException) as error:
-        print(f"No se pudo verificar CouchDB. {error}", file=sys.stderr)
+        componente = "el ensayo E4" if args.probar_e4 else "CouchDB"
+        if args.probar_corte_api:
+            componente = "el enlace cliente → API"
+        print(f"No se pudo verificar {componente}. {error}", file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
