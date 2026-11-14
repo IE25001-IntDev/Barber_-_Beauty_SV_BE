@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Levanta CouchDB central y comprueba la base de la aplicación."""
+"""Levanta una instancia de CouchDB y comprueba la base de la aplicación."""
 
+import argparse
 import base64
 import http.client
 import json
@@ -15,16 +16,17 @@ from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[1]
 COMPOSE = ["docker", "compose", "--env-file", ".env", "-f", "compose.yaml"]
+LOCAL = ["--env-file", ".env.local", "-f", "compose.local.yaml"]
 
 
-def preparar_entorno():
-    destino = RAIZ / ".env"
+def preparar_entorno(nombre, variable):
+    destino = RAIZ / nombre
     if destino.exists():
         return
 
-    plantilla = (RAIZ / ".env.example").read_text(encoding="utf-8")
+    plantilla = (RAIZ / f"{nombre}.example").read_text(encoding="utf-8")
     contenido = plantilla.replace(
-        "COUCHDB_PASSWORD=\n", f"COUCHDB_PASSWORD={secrets.token_hex(24)}\n", 1
+        f"{variable}=\n", f"{variable}={secrets.token_hex(24)}\n", 1
     )
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=RAIZ) as temporal:
         temporal.write(contenido)
@@ -33,7 +35,7 @@ def preparar_entorno():
             os.link(temporal.name, destino)
         except FileExistsError:
             return
-    print("Archivo .env local creado con una contraseña aleatoria.", flush=True)
+    print(f"Archivo {nombre} creado con una contraseña aleatoria.", flush=True)
 
 
 def solicitud(puerto, metodo, ruta, credencial=None):
@@ -63,31 +65,34 @@ def esperar_couchdb(puerto):
     raise RuntimeError("CouchDB no indicó que estuviera listo en 60 segundos.")
 
 
-def main():
-    preparar_entorno()
+def iniciar(compose, servicio, archivo_env, variable):
+    if servicio == "couchdb-local" and not (RAIZ / ".env").is_file():
+        raise RuntimeError("Configura primero CouchDB central para crear .env.")
+
+    preparar_entorno(archivo_env, variable)
     resultado = subprocess.run(
-        [*COMPOSE, "config", "--format", "json"],
+        [*compose, "config", "--format", "json"],
         cwd=RAIZ,
         check=True,
         stdout=subprocess.PIPE,
     )
-    servicio = json.loads(resultado.stdout)["services"]["couchdb"]
-    entorno = servicio["environment"]
+    configuracion = json.loads(resultado.stdout)["services"][servicio]
+    entorno = configuracion["environment"]
     base = entorno["COUCHDB_DATABASE"]
     if not re.fullmatch(r"[a-z][a-z0-9_-]*", base):
         raise RuntimeError(
-            "COUCHDB_DATABASE debe empezar con una letra minúscula "
+            f"El nombre de la base en {archivo_env} debe empezar con una letra minúscula "
             "y usar letras minúsculas, números, guiones o guiones bajos."
         )
 
-    puerto = int(servicio["ports"][0]["published"])
+    puerto = int(configuracion["ports"][0]["published"])
     usuario = entorno["COUCHDB_USER"]
     clave = entorno["COUCHDB_PASSWORD"]
     if ":" in usuario:
-        raise RuntimeError("COUCHDB_USER no puede contener dos puntos.")
+        raise RuntimeError(f"El usuario en {archivo_env} no puede contener dos puntos.")
     credencial = base64.b64encode(f"{usuario}:{clave}".encode("utf-8")).decode("ascii")
 
-    subprocess.run([*COMPOSE, "up", "-d", "--build", "couchdb"], cwd=RAIZ, check=True)
+    subprocess.run([*compose, "up", "-d", "--build", servicio], cwd=RAIZ, check=True)
     esperar_couchdb(puerto)
 
     codigo, cuerpo = solicitud(puerto, "PUT", f"/{base}", credencial)
@@ -104,13 +109,25 @@ def main():
     if codigo not in (401, 403):
         raise RuntimeError(f"La base respondió HTTP {codigo} a una consulta sin credenciales.")
 
-    print(f"CouchDB listo. Base: {base}. Consulta autenticada: HTTP 200.")
+    instancia = "CouchDB local" if servicio == "couchdb-local" else "CouchDB"
+    print(f"{instancia} listo. Base: {base}. Consulta autenticada: HTTP 200.")
     print(f"Fauxton: http://127.0.0.1:{puerto}/_utils/")
 
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--local", action="store_true", help="Inicia la instancia del laboratorio.")
+    args = parser.parse_args()
+
+    if args.local:
+        compose, servicio = [*COMPOSE, *LOCAL], "couchdb-local"
+        archivo_env, variable = ".env.local", "COUCHDB_LOCAL_PASSWORD"
+    else:
+        compose, servicio = COMPOSE, "couchdb"
+        archivo_env, variable = ".env", "COUCHDB_PASSWORD"
+
     try:
-        main()
+        iniciar(compose, servicio, archivo_env, variable)
     except FileNotFoundError as error:
         if error.filename == "docker":
             print("Docker no está disponible en esta terminal.", file=sys.stderr)
@@ -119,11 +136,14 @@ if __name__ == "__main__":
         sys.exit(1)
     except subprocess.CalledProcessError:
         print(
-            "Falló Docker Compose. Revisa el mensaje de Docker y ejecuta "
-            "`docker compose logs --tail=60 couchdb` si el servicio llegó a iniciarse.",
+            f"Falló Docker Compose para {servicio}. Revisa el mensaje de Docker.",
             file=sys.stderr,
         )
         sys.exit(1)
     except (OSError, RuntimeError, ValueError, http.client.HTTPException) as error:
         print(f"No se pudo verificar CouchDB. {error}", file=sys.stderr)
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

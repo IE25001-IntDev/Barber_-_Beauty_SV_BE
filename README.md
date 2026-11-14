@@ -53,6 +53,36 @@ curl --noproxy '*' -fsS --max-time 5 http://127.0.0.1:18080/api/ready
 
 Ambas rutas devuelven `{"status":"ok"}` cuando el proceso responde y la conexión a CouchDB está disponible. `/api/health` comprueba el proceso. `/api/ready` hace una consulta `HEAD` autenticada a la base configurada y devuelve HTTP 503 si CouchDB no responde, las credenciales se rechazan o la base no existe. La consulta es de solo lectura.
 
+## CouchDB local del laboratorio
+
+Después de configurar CouchDB central, ejecuta desde la raíz del repositorio:
+
+```bash
+python3 scripts/iniciar-couchdb.py --local
+```
+
+El script reutiliza la imagen base y la configuración de nodo único de CouchDB central. En el primer arranque genera `.env.local` con una contraseña propia. Para elegir tus credenciales, copia `.env.local.example` a `.env.local` y define `COUCHDB_LOCAL_USER` y `COUCHDB_LOCAL_PASSWORD` antes del primer arranque. Compose exige un valor para ambas variables.
+
+| Parámetro | CouchDB local |
+|---|---|
+| Servicio | `couchdb-local` |
+| URL desde Linux | `http://127.0.0.1:15987` |
+| URL dentro de la red de Compose | `http://couchdb-local:5984` |
+| Base predeterminada | `barberia_citas` |
+| Volumen de datos | `bad215-backend_couchdb_local_data` |
+| Límites | 384 MiB de RAM y 1 CPU |
+
+`COUCHDB_LOCAL_PORT` y `COUCHDB_LOCAL_DATABASE` permiten ajustar los valores en `.env.local`. El script espera a que CouchDB responda, crea la base si hace falta y verifica el acceso autenticado. La base `barberia_citas` de cada instancia guarda sus datos en el volumen que le corresponde. Para ver la base local en [Fauxton](http://127.0.0.1:15987/_utils/), usa las credenciales de `.env.local`.
+
+El archivo `compose.local.yaml` agrega el servicio al proyecto del laboratorio cuando se carga junto a `compose.yaml`. Para ver ambas instancias y detener únicamente la local, ejecuta:
+
+```bash
+docker compose --env-file .env --env-file .env.local -f compose.yaml -f compose.local.yaml ps
+docker compose --env-file .env --env-file .env.local -f compose.yaml -f compose.local.yaml stop couchdb-local
+```
+
+Con Docker Desktop para Linux, selecciona el contexto `desktop-linux` o antepone `DOCKER_CONTEXT=desktop-linux` a los comandos. En este montaje, cada instancia guarda sus datos por separado. La replicación se configura en la siguiente etapa del laboratorio.
+
 - [Contrato de API](CONTRATO_API.md)
 - [Instalación en Docker](https://docs.couchdb.org/en/stable/install/docker.html)
 - [Configuración de CouchDB en nodo único](https://docs.couchdb.org/en/stable/setup/single-node.html)
