@@ -1,0 +1,19 @@
+name: bad215-backend
+
+services:
+  couchdb:
+    build:
+      context: ./couchdb
+    environment:
+      COUCHDB_USER: "${COUCHDB_USER:?Define COUCHDB_USER en .env}"
+      COUCHDB_PASSWORD: "${COUCHDB_PASSWORD:?Define COUCHDB_PASSWORD en .env}"
+      COUCHDB_DATABASE: "${COUCHDB_DATABASE:-barberia_citas}"
+    ports:
+      - "127.0.0.1:${COUCHDB_PORT:-15986}:5984"
+    volumes:
+      - couchdb_data:/opt/couchdb/data
+    mem_limit: 512m
+    cpus: 1.0
+
+volumes:
+  couchdb_data:
