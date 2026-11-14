@@ -47,6 +47,24 @@ struct FindPage {
 }
 
 impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
+    async fn find_by_id(&self, id: &str) -> Result<Option<Appointment>, AppointmentReadError> {
+        let query = json!({
+            "selector": {
+                "_id": {"$eq": id},
+                "cliente_nombre": {"$exists": true},
+                "servicio_id": {"$exists": true}
+            },
+            "limit": 1
+        });
+
+        Ok(self
+            .find_page(&query)
+            .await?
+            .docs
+            .pop()
+            .map(Appointment::from))
+    }
+
     async fn list_starting_between(
         &self,
         start: DateTime<Utc>,
@@ -75,20 +93,7 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
 
         let mut appointments: Vec<Appointment> = Vec::new();
         loop {
-            let response = self
-                .0
-                .find(&query)
-                .send()
-                .await
-                .map_err(|_| AppointmentReadError::Unavailable)?;
-            if !response.status().is_success() {
-                return Err(AppointmentReadError::Unavailable);
-            }
-
-            let page: FindPage = response
-                .json()
-                .await
-                .map_err(|_| AppointmentReadError::InvalidData)?;
+            let page = self.find_page(&query).await?;
             let count = page.docs.len();
             appointments.extend(
                 page.docs
@@ -111,5 +116,24 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
 
         appointments.sort_unstable_by(|a, b| a.inicio.cmp(&b.inicio).then_with(|| a.id.cmp(&b.id)));
         Ok(appointments)
+    }
+}
+
+impl CouchDbAppointmentRepository<'_> {
+    async fn find_page(&self, query: &serde_json::Value) -> Result<FindPage, AppointmentReadError> {
+        let response = self
+            .0
+            .find(query)
+            .send()
+            .await
+            .map_err(|_| AppointmentReadError::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(AppointmentReadError::Unavailable);
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|_| AppointmentReadError::InvalidData)
     }
 }

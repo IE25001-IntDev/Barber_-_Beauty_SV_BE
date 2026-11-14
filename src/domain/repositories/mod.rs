@@ -10,6 +10,11 @@ pub enum AppointmentReadError {
 }
 
 pub trait AppointmentRepository {
+    fn find_by_id(
+        &self,
+        id: &str,
+    ) -> impl Future<Output = Result<Option<Appointment>, AppointmentReadError>> + Send;
+
     fn list_starting_between(
         &self,
         start: DateTime<Utc>,

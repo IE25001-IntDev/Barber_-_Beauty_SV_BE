@@ -11,6 +11,13 @@ pub enum ListAppointmentsError {
     Repository(AppointmentReadError),
 }
 
+pub async fn get_appointment(
+    repository: &impl AppointmentRepository,
+    id: &str,
+) -> Result<Option<Appointment>, AppointmentReadError> {
+    repository.find_by_id(id).await
+}
+
 pub async fn list_appointments(
     repository: &impl AppointmentRepository,
     date: &str,
