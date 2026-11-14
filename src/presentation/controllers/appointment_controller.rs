@@ -2,7 +2,7 @@ use axum::{
     Json,
     extract::{
         Path, Query, State,
-        rejection::{PathRejection, QueryRejection},
+        rejection::{JsonRejection, PathRejection, QueryRejection},
     },
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -11,12 +11,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     application::services::appointment_service::{
-        ListAppointmentsError, get_appointment, list_appointments,
+        CreateAppointmentError, ListAppointmentsError, create_appointment, get_appointment,
+        list_appointments,
     },
-    domain::{entities::appointment::Appointment, repositories::RepositoryReadError},
+    domain::{
+        entities::appointment::{Appointment, NewAppointment},
+        repositories::RepositoryReadError,
+    },
     infrastructure::{
         database::couchdb::CouchDb,
-        repositories::couchdb_appointment_repository::CouchDbAppointmentRepository,
+        repositories::{
+            couchdb_appointment_repository::CouchDbAppointmentRepository,
+            couchdb_catalog_repository::CouchDbCatalogRepository,
+        },
     },
     shared::errors::error_response,
 };
@@ -89,4 +96,65 @@ fn repository_error(error: RepositoryReadError) -> Response {
             "La API no pudo leer los datos de las citas.",
         ),
     }
+}
+
+pub async fn create(
+    State(couchdb): State<CouchDb>,
+    body: Result<Json<NewAppointment>, JsonRejection>,
+) -> Response {
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            let status = error.status();
+            let (code, message) = match status {
+                StatusCode::UNSUPPORTED_MEDIA_TYPE => (
+                    "TIPO_CONTENIDO_INVALIDO",
+                    "Envía la cita con Content-Type: application/json.",
+                ),
+                StatusCode::UNPROCESSABLE_ENTITY => (
+                    "CITA_INVALIDA",
+                    "Revisa los campos y tipos de datos de la cita.",
+                ),
+                StatusCode::PAYLOAD_TOO_LARGE => (
+                    "SOLICITUD_DEMASIADO_GRANDE",
+                    "El cuerpo de la solicitud excede el tamaño permitido.",
+                ),
+                _ => ("JSON_INVALIDO", "Envía un cuerpo JSON válido."),
+            };
+            return error_response(status, code, message);
+        }
+    };
+
+    let repository = CouchDbAppointmentRepository(&couchdb);
+    let catalog = CouchDbCatalogRepository(&couchdb);
+    let (status, code, message) = match create_appointment(&repository, &catalog, request).await {
+        Ok(appointment) => return (StatusCode::CREATED, Json(appointment)).into_response(),
+        Err(CreateAppointmentError::Repository(error)) => return repository_error(error),
+        Err(CreateAppointmentError::InvalidFields) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "CITA_INVALIDA",
+            "Envía un UUID v4 para la cita y valores no vacíos para cliente, empleado y servicio.",
+        ),
+        Err(CreateAppointmentError::InvalidTrace) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "TRAZABILIDAD_INVALIDA",
+            "Envía juntos op_id (UUID v4), ts_cliente, vu (positivo) e iteracion.",
+        ),
+        Err(CreateAppointmentError::EmployeeUnavailable) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "EMPLEADO_NO_DISPONIBLE",
+            "El empleado indicado debe existir y estar activo.",
+        ),
+        Err(CreateAppointmentError::ServiceUnavailable) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "SERVICIO_NO_DISPONIBLE",
+            "El servicio indicado debe existir y estar activo.",
+        ),
+        Err(CreateAppointmentError::Conflict) => (
+            StatusCode::CONFLICT,
+            "CITA_EN_CONFLICTO",
+            "El identificador de cita ya está en uso.",
+        ),
+    };
+    error_response(status, code, message)
 }

@@ -1,11 +1,12 @@
 use chrono::{DateTime, Datelike, Duration, Utc};
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
     domain::{
-        entities::appointment::{Appointment, AppointmentStatus},
-        repositories::{AppointmentRepository, RepositoryReadError},
+        entities::appointment::{Appointment, AppointmentStatus, CreationTrace, NewAppointment},
+        repositories::{AppointmentInsertError, AppointmentRepository, RepositoryReadError},
     },
     infrastructure::database::couchdb::CouchDb,
 };
@@ -22,6 +23,8 @@ struct AppointmentDocument {
     inicio: DateTime<Utc>,
     estado: AppointmentStatus,
     precio_centavos: u64,
+    #[serde(default)]
+    creacion: Option<CreationTrace>,
 }
 
 impl From<AppointmentDocument> for Appointment {
@@ -38,8 +41,11 @@ impl From<AppointmentDocument> for Appointment {
     }
 }
 
-impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
-    async fn find_by_id(&self, id: &str) -> Result<Option<Appointment>, RepositoryReadError> {
+impl CouchDbAppointmentRepository<'_> {
+    async fn find_document(
+        &self,
+        id: &str,
+    ) -> Result<Option<AppointmentDocument>, RepositoryReadError> {
         let query = json!({
             "selector": {
                 "_id": {"$eq": id},
@@ -54,8 +60,70 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
             .find_page::<AppointmentDocument>(&query)
             .await?
             .docs
-            .pop()
-            .map(Appointment::from))
+            .pop())
+    }
+}
+
+impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
+    async fn find_by_id(&self, id: &str) -> Result<Option<Appointment>, RepositoryReadError> {
+        Ok(self.find_document(id).await?.map(Appointment::from))
+    }
+
+    async fn find_creation(
+        &self,
+        request: &NewAppointment,
+        trace: &CreationTrace,
+    ) -> Result<Option<Appointment>, AppointmentInsertError> {
+        let Some(document) = self
+            .find_document(&request.id)
+            .await
+            .map_err(AppointmentInsertError::Read)?
+        else {
+            return Ok(None);
+        };
+        if document.creacion.as_ref() == Some(trace)
+            && document.cliente_nombre == request.cliente_nombre
+            && document.empleado_id == request.empleado_id
+            && document.servicio_id == request.servicio_id
+            && document.inicio == request.inicio
+        {
+            return Ok(Some(document.into()));
+        }
+        Err(AppointmentInsertError::Conflict)
+    }
+
+    async fn insert(
+        &self,
+        appointment: Appointment,
+        trace: Option<&CreationTrace>,
+    ) -> Result<Appointment, AppointmentInsertError> {
+        let mut document = json!({
+            "tipo": "cita",
+            "cliente_nombre": appointment.cliente_nombre,
+            "empleado_id": appointment.empleado_id,
+            "servicio_id": appointment.servicio_id,
+            "inicio": appointment.inicio,
+            "estado": appointment.estado,
+            "precio_centavos": appointment.precio_centavos
+        });
+        if let Some(trace) = trace {
+            document["creacion"] = json!(trace);
+        }
+
+        let response = self
+            .0
+            .put_document(&appointment.id, &document)
+            .send()
+            .await
+            .map_err(|_| AppointmentInsertError::Read(RepositoryReadError::Unavailable))?;
+
+        match response.status() {
+            StatusCode::CREATED | StatusCode::ACCEPTED => Ok(appointment),
+            StatusCode::CONFLICT => Err(AppointmentInsertError::Conflict),
+            _ => Err(AppointmentInsertError::Read(
+                RepositoryReadError::Unavailable,
+            )),
+        }
     }
 
     async fn list_starting_between(

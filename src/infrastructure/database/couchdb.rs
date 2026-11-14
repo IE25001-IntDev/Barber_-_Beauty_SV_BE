@@ -131,6 +131,18 @@ impl CouchDb {
             .json(query)
     }
 
+    pub(crate) fn put_document(&self, id: &str, document: &Value) -> RequestBuilder {
+        let mut url = self.database_url.clone();
+        url.path_segments_mut()
+            .expect("la URL de CouchDB admite segmentos de ruta")
+            .push(id);
+
+        self.client
+            .put(url)
+            .basic_auth(&self.user, Some(&self.password))
+            .json(document)
+    }
+
     pub async fn database_available(&self) -> bool {
         self.client
             .head(self.database_url.clone())

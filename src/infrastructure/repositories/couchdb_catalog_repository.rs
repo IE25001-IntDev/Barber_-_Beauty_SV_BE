@@ -4,7 +4,7 @@ use serde_json::json;
 use crate::{
     domain::{
         entities::{barber::Barber, catalog::CatalogEntry, service::Service},
-        repositories::RepositoryReadError,
+        repositories::{AppointmentCatalog, RepositoryReadError},
     },
     infrastructure::database::couchdb::CouchDb,
 };
@@ -48,5 +48,32 @@ impl CouchDbCatalogRepository<'_> {
 
         entries.sort_unstable_by(|a, b| a.id.cmp(&b.id));
         Ok(entries)
+    }
+}
+
+impl AppointmentCatalog for CouchDbCatalogRepository<'_> {
+    async fn find_employee(&self, id: &str) -> Result<Option<Barber>, RepositoryReadError> {
+        self.find(id, "empleado").await
+    }
+
+    async fn find_service(&self, id: &str) -> Result<Option<Service>, RepositoryReadError> {
+        self.find(id, "servicio").await
+    }
+}
+
+impl CouchDbCatalogRepository<'_> {
+    async fn find<T: DeserializeOwned>(
+        &self,
+        id: &str,
+        document_type: &str,
+    ) -> Result<Option<T>, RepositoryReadError> {
+        let query = json!({"selector": {"_id": {"$eq": id}, "tipo": document_type}, "limit": 1});
+        Ok(self
+            .0
+            .find_page::<CatalogDocument<T>>(&query)
+            .await?
+            .docs
+            .pop()
+            .map(|document| document.data))
     }
 }
