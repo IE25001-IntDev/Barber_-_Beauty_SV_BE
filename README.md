@@ -206,3 +206,11 @@ Para apagar el laboratorio conservando sus volúmenes:
 docker compose -p bad215-laboratorio-red --env-file .env --env-file .env.local \
   -f compose.yaml -f compose.local.yaml -f compose.laboratorio.yaml down
 ```
+
+## Comisiones
+
+Las citas completadas generan una comisión con `COMISION_PORCENTAJE` (entero entre
+0 y 100, 40 por defecto). Se consulta por fecha local de generación mediante
+`GET /api/comisiones?desde=YYYY-MM-DD&hasta=YYYY-MM-DD`. Si falla el guardado de la
+comisión, reintenta el PUT de la cita con estado `completada`; la comisión existente
+se conserva. Ver los detalles y el redondeo en el contrato de API.
