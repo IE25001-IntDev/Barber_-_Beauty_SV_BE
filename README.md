@@ -81,7 +81,19 @@ docker compose --env-file .env --env-file .env.local -f compose.yaml -f compose.
 docker compose --env-file .env --env-file .env.local -f compose.yaml -f compose.local.yaml stop couchdb-local
 ```
 
-Con Docker Desktop para Linux, selecciona el contexto `desktop-linux` o antepone `DOCKER_CONTEXT=desktop-linux` a los comandos. En este montaje, cada instancia guarda sus datos por separado. La replicación se configura en la siguiente etapa del laboratorio.
+Con Docker Desktop para Linux, selecciona el contexto `desktop-linux` o antepone `DOCKER_CONTEXT=desktop-linux` a los comandos.
+
+### Prueba de replicación local → central
+
+Con ambos servicios activos, ejecuta:
+
+```bash
+python3 scripts/iniciar-couchdb.py --replicar-prueba
+```
+
+El script verifica las dos bases con sus credenciales, genera un `op_id` nuevo y crea el documento de prueba en CouchDB local. Tras comprobar que la central devuelve HTTP 404 para ese ID, solicita una replicación puntual mediante `POST /_replicate`. La opción `doc_ids` limita la transferencia a ese documento. La prueba termina cuando la central devuelve HTTP 200 con el mismo ID, revisión y contenido. El documento ficticio queda en ambas instancias como evidencia de la prueba.
+
+La replicación usa las direcciones internas `couchdb-local:5984` y `couchdb:5984`, con las credenciales de cada servicio resueltas desde `.env.local` y `.env`. Para los ensayos de recuperación tras un corte se configurará la replicación continua en el enlace experimental y se medirá por separado la validación de operaciones por Rust.
 
 - [Contrato de API](CONTRATO_API.md)
 - [Instalación en Docker](https://docs.couchdb.org/en/stable/install/docker.html)
