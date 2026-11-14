@@ -13,11 +13,13 @@ import sys
 import tempfile
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[1]
 COMPOSE = ["docker", "compose", "--env-file", ".env", "-f", "compose.yaml"]
 LOCAL = ["--env-file", ".env.local", "-f", "compose.local.yaml"]
+REPLICACION = [*COMPOSE, *LOCAL, "--profile", "replicacion"]
 
 
 def preparar_entorno(nombre, variable):
@@ -147,24 +149,24 @@ def extremo_replicacion(nombre, base, servicio):
     }
 
 
-def replicar_prueba():
+def instancias_replicacion():
     servicios = servicios_compose([*COMPOSE, *LOCAL])
     local = servicios["couchdb-local"]
     central = servicios["couchdb"]
-    puerto_local, base_local, credencial_local = parametros(local)
-    puerto_central, base_central, credencial_central = parametros(central)
-    if puerto_local == puerto_central:
+    origen = parametros(local)
+    destino = parametros(central)
+    if origen[0] == destino[0]:
         raise RuntimeError("Las dos instancias deben usar puertos publicados distintos.")
-    verificar_base(puerto_local, base_local, credencial_local, "CouchDB local")
-    verificar_base(puerto_central, base_central, credencial_central, "CouchDB central")
+    verificar_base(*origen, "CouchDB local")
+    verificar_base(*destino, "CouchDB central")
+    return local, central, origen, destino
 
-    op_id = str(uuid.uuid4())
-    doc_id = f"prueba-replicacion-{op_id}"
-    ruta_local = f"/{base_local}/{doc_id}"
-    ruta_central = f"/{base_central}/{doc_id}"
+
+def guardar_prueba(instancia, doc_id, op_id):
+    puerto, base, credencial = instancia
     documento = {"tipo": "prueba_replicacion", "op_id": op_id}
     codigo, cuerpo = solicitud(
-        puerto_local, "PUT", ruta_local, credencial_local, datos=documento
+        puerto, "PUT", f"/{base}/{doc_id}", credencial, datos=documento
     )
     if codigo not in (201, 202):
         raise RuntimeError(f"Falló la escritura del documento local (HTTP {codigo}).")
@@ -173,8 +175,23 @@ def replicar_prueba():
     if guardado.get("ok") is not True or guardado.get("id") != doc_id or not revision:
         raise RuntimeError("CouchDB local no confirmó el ID y la revisión del documento.")
     print(f"Local: documento creado con HTTP {codigo}.", flush=True)
+    return {**documento, "_id": doc_id, "_rev": revision}
 
-    codigo, _ = solicitud(puerto_central, "GET", ruta_central, credencial_central)
+
+def leer_prueba(instancia, doc_id):
+    puerto, base, credencial = instancia
+    return solicitud(puerto, "GET", f"/{base}/{doc_id}", credencial)
+
+
+def replicar_prueba():
+    local, central, origen, destino = instancias_replicacion()
+    puerto_local, base_local, credencial_local = origen
+    _, base_central, _ = destino
+    op_id = str(uuid.uuid4())
+    doc_id = f"prueba-replicacion-{op_id}"
+    esperado = guardar_prueba(origen, doc_id, op_id)
+
+    codigo, _ = leer_prueba(destino, doc_id)
     if codigo != 404:
         raise RuntimeError(f"CouchDB central debía devolver HTTP 404 y devolvió {codigo}.")
     print(f"Central antes de replicar: HTTP 404 para {doc_id}.", flush=True)
@@ -196,12 +213,123 @@ def replicar_prueba():
     if codigo != 200 or json.loads(cuerpo).get("ok") is not True:
         raise RuntimeError(f"CouchDB no confirmó la replicación (HTTP {codigo}).")
 
-    codigo, cuerpo = solicitud(puerto_central, "GET", ruta_central, credencial_central)
-    esperado = {**documento, "_id": doc_id, "_rev": revision}
+    codigo, cuerpo = leer_prueba(destino, doc_id)
     if codigo != 200 or json.loads(cuerpo) != esperado:
         raise RuntimeError(f"El documento central no coincide con el original (HTTP {codigo}).")
     print("Central después de replicar: HTTP 200, mismo ID, revisión y contenido.")
     print("Prueba de replicación local → central completada.")
+
+
+def esperar_documento(instancia, esperado, segundos):
+    limite = time.monotonic() + segundos
+    while True:
+        codigo, cuerpo = leer_prueba(instancia, esperado["_id"])
+        if codigo == 200 and json.loads(cuerpo) == esperado:
+            return
+        if codigo != 404:
+            raise RuntimeError(f"La revisión o el contenido no coinciden, o falló la lectura (HTTP {codigo}).")
+        restante = limite - time.monotonic()
+        if restante <= 0:
+            raise RuntimeError(f"La base no devolvió el documento en {segundos} segundos.")
+        time.sleep(min(1, restante))
+
+
+def operar_enlace(*argumentos):
+    subprocess.run(
+        [*REPLICACION, *argumentos, "enlace-replicacion"],
+        cwd=RAIZ, check=True, timeout=120,
+    )
+
+
+def verificar_enlace():
+    # Consulta desde el mismo contenedor que inicia la replicación.
+    prueba = r'''
+exec 3<>/dev/tcp/enlace-replicacion/5984 || exit 1
+printf 'GET /_up HTTP/1.1\r\nHost: enlace-replicacion\r\nConnection: close\r\n\r\n' >&3
+read -r protocolo codigo resto <&3 && [[ "$protocolo" == HTTP/* && "$codigo" == 200 ]]
+'''
+    for _ in range(5):
+        resultado = subprocess.run(
+            [*REPLICACION, "exec", "-T", "couchdb-local", "timeout", "3", "bash", "-c", prueba],
+            cwd=RAIZ, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8,
+        )
+        if resultado.returncode == 0:
+            print("Enlace de replicación verificado desde CouchDB local: HTTP 200.", flush=True)
+            return
+        time.sleep(1)
+
+    operar_enlace("ps", "-a")
+    operar_enlace("logs", "--tail=12")
+    raise RuntimeError("CouchDB local no pudo obtener HTTP 200 a través del enlace de replicación.")
+
+
+def probar_corte(segundos):
+    local, central, origen, destino = instancias_replicacion()
+    puerto_local, base_local, credencial_local = origen
+    _, base_central, _ = destino
+    op_control, op_corte = str(uuid.uuid4()), str(uuid.uuid4())
+    id_control = f"prueba-replicacion-{op_control}"
+    id_corte = f"prueba-replicacion-{op_corte}"
+    trabajo = {
+        "source": extremo_replicacion("couchdb-local", base_local, local),
+        "target": extremo_replicacion("enlace-replicacion", base_central, central),
+        "doc_ids": [id_control, id_corte],
+        "continuous": True,
+        "create_target": False,
+        # El trabajo transitorio debe seguir reintentando durante el corte de 60 s.
+        "retries_per_request": 10,
+    }
+    operar_enlace("up", "-d", "--no-deps")
+    verificar_enlace()
+
+    try:
+        codigo, cuerpo = solicitud(
+            puerto_local, "POST", "/_replicate", credencial_local, datos=trabajo, timeout=15
+        )
+        if codigo != 202 or json.loads(cuerpo).get("ok") is not True:
+            raise RuntimeError(f"CouchDB no aceptó la replicación continua (HTTP {codigo}).")
+
+        control = guardar_prueba(origen, id_control, op_control)
+        esperar_documento(destino, control, 45)
+        print("Antes del corte: documento de control confirmado en central.", flush=True)
+
+        try:
+            operar_enlace("stop", "--timeout", "2")
+            inicio = time.monotonic()
+            print(f"{datetime.now(timezone.utc).isoformat()} Enlace interrumpido.", flush=True)
+            pendiente = guardar_prueba(origen, id_corte, op_corte)
+            esperar_documento(origen, pendiente, 5)
+            codigo, _ = leer_prueba(destino, id_corte)
+            if codigo != 404:
+                raise RuntimeError(f"Durante el corte se esperaba HTTP 404 y se obtuvo {codigo}.")
+            print(f"Durante el corte: local HTTP 200 y central HTTP 404 para {id_corte}.", flush=True)
+            time.sleep(max(0, segundos - (time.monotonic() - inicio)))
+        finally:
+            operar_enlace("start")
+
+        recuperado = time.monotonic()
+        print(f"{datetime.now(timezone.utc).isoformat()} Enlace restablecido.", flush=True)
+        esperar_documento(destino, pendiente, 120)
+        print(f"Central: HTTP 200, misma revisión y contenido. Recuperación: {time.monotonic() - recuperado:.2f} s.")
+    finally:
+        fallo_prueba = sys.exc_info()[0] is not None
+        try:
+            codigo, _ = solicitud(
+                puerto_local,
+                "POST",
+                "/_replicate",
+                credencial_local,
+                datos={**trabajo, "cancel": True},
+                timeout=10,
+            )
+            if codigo not in (200, 404):
+                raise RuntimeError(f"No se pudo cancelar la replicación de prueba (HTTP {codigo}).")
+        except (OSError, RuntimeError, http.client.HTTPException) as error:
+            if not fallo_prueba:
+                raise
+            print(f"No se confirmó la cancelación de la replicación: {error}", file=sys.stderr)
+
+    print("Prueba de recuperación local → central completada.")
 
 
 def main():
@@ -209,6 +337,7 @@ def main():
     modos = parser.add_mutually_exclusive_group()
     modos.add_argument("--local", action="store_true", help="Inicia la instancia del laboratorio.")
     modos.add_argument("--replicar-prueba", action="store_true", help="Replica un documento ficticio.")
+    modos.add_argument("--probar-corte", action="store_true", help="Prueba recuperación tras un corte de 60 segundos.")
     args = parser.parse_args()
 
     if args.local:
@@ -221,6 +350,8 @@ def main():
     try:
         if args.replicar_prueba:
             replicar_prueba()
+        elif args.probar_corte:
+            probar_corte(60)
         else:
             iniciar(compose, servicio, archivo_env, variable)
     except FileNotFoundError as error:
@@ -229,12 +360,15 @@ def main():
         else:
             print(f"Falta un archivo requerido: {error.filename}", file=sys.stderr)
         sys.exit(1)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print(
             "Falló Docker Compose. Revisa el mensaje de Docker.",
             file=sys.stderr,
         )
         sys.exit(1)
+    except KeyboardInterrupt:
+        print("Prueba interrumpida.", file=sys.stderr)
+        sys.exit(130)
     except (OSError, RuntimeError, ValueError, http.client.HTTPException) as error:
         print(f"No se pudo verificar CouchDB. {error}", file=sys.stderr)
         sys.exit(1)

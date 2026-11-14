@@ -93,7 +93,28 @@ python3 scripts/iniciar-couchdb.py --replicar-prueba
 
 El script verifica las dos bases con sus credenciales, genera un `op_id` nuevo y crea el documento de prueba en CouchDB local. Tras comprobar que la central devuelve HTTP 404 para ese ID, solicita una replicación puntual mediante `POST /_replicate`. La opción `doc_ids` limita la transferencia a ese documento. La prueba termina cuando la central devuelve HTTP 200 con el mismo ID, revisión y contenido. El documento ficticio queda en ambas instancias como evidencia de la prueba.
 
-La replicación usa las direcciones internas `couchdb-local:5984` y `couchdb:5984`, con las credenciales de cada servicio resueltas desde `.env.local` y `.env`. Para los ensayos de recuperación tras un corte se configurará la replicación continua en el enlace experimental y se medirá por separado la validación de operaciones por Rust.
+La replicación usa las direcciones internas `couchdb-local:5984` y `couchdb:5984`, con las credenciales de cada servicio resueltas desde `.env.local` y `.env`.
+
+### Replicación continua durante un corte del enlace
+
+Con ambas instancias activas, ejecuta en Docker Desktop para Linux:
+
+```bash
+DOCKER_CONTEXT=desktop-linux python3 scripts/iniciar-couchdb.py --probar-corte
+```
+
+El script levanta `enlace-replicacion`, un intermediario TCP interno que reenvía a CouchDB central. El intermediario usa un hilo, admite hasta 64 conexiones simultáneas y dispone de un límite de memoria de 64 MiB. El script verifica el enlace desde el contenedor local antes de iniciar una replicación continua limitada a dos documentos ficticios. Una vez confirmado el primero en la central, detiene el intermediario durante 60 segundos, guarda el segundo documento en local y comprueba que puede leerlo allí mientras la central devuelve HTTP 404 para ese ID.
+
+El trabajo de prueba configura 10 reintentos por solicitud para sostener la replicación continua durante el corte. Al restablecer el enlace, el mismo trabajo dispone de hasta 120 segundos para entregar el documento. El script verifica el ID, la revisión y el contenido y registra en la terminal las marcas UTC del corte y el tiempo hasta la primera lectura exitosa en central. Al terminar cancela el trabajo de prueba. Los documentos ficticios quedan disponibles para inspección.
+
+Esta prueba verifica la recuperación del enlace de replicación. La campaña E4 también contempla el enlace cliente → API y la validación de las operaciones por Rust.
+
+Si la terminal se cierra durante el corte, puedes restablecer el intermediario desde el repositorio:
+
+```bash
+docker --context desktop-linux compose --env-file .env --env-file .env.local \
+  -f compose.yaml -f compose.local.yaml --profile replicacion start enlace-replicacion
+```
 
 - [Contrato de API](CONTRATO_API.md)
 - [Instalación en Docker](https://docs.couchdb.org/en/stable/install/docker.html)

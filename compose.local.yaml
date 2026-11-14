@@ -13,5 +13,13 @@ services:
     mem_limit: 384m
     cpus: 1.0
 
+  enlace-replicacion:
+    image: haproxy:3.2-alpine
+    profiles: [replicacion]
+    volumes:
+      - ./couchdb/enlace-replicacion.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    mem_limit: 64m
+    stop_signal: SIGTERM
+
 volumes:
   couchdb_local_data:
