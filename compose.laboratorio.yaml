@@ -1,0 +1,58 @@
+name: bad215-laboratorio-red
+
+x-enlace: &enlace
+  build:
+    context: ./laboratorio/red
+  cap_add: [NET_ADMIN]
+  mem_limit: 64m
+  stop_signal: SIGTERM
+
+services:
+  couchdb:
+    environment:
+      COUCHDB_DATABASE: bad215_lab_citas
+    ports: !override
+      - "127.0.0.1:${COUCHDB_LAB_CENTRAL_PORT:-16086}:5984"
+
+  couchdb-local:
+    environment:
+      COUCHDB_DATABASE: bad215_lab_citas
+    ports: !override
+      - "127.0.0.1:${COUCHDB_LAB_LOCAL_PORT:-16087}:5984"
+
+  api-laboratorio:
+    image: debian:trixie-slim
+    entrypoint: [/app/BD_Backend]
+    environment:
+      API_HOST: "0.0.0.0"
+      API_PORT: "18080"
+      COUCHDB_URL: "http://couchdb:5984"
+      COUCHDB_DATABASE: bad215_lab_citas
+      COUCHDB_USER: "${COUCHDB_USER:?Define COUCHDB_USER en .env}"
+      COUCHDB_PASSWORD: "${COUCHDB_PASSWORD:?Define COUCHDB_PASSWORD en .env}"
+    volumes:
+      - type: bind
+        source: ./target/debug/BD_Backend
+        target: /app/BD_Backend
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "127.0.0.1:${API_LAB_DIRECTA_PORT:-18082}:18080"
+    mem_limit: 256m
+    cpus: 1.0
+    depends_on: [couchdb]
+
+  enlace-api-lab:
+    <<: *enlace
+    volumes:
+      - ./laboratorio/red/api.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "127.0.0.1:${API_LAB_PORT:-18081}:18080"
+    depends_on: [api-laboratorio]
+
+  enlace-replica-lab:
+    <<: *enlace
+    volumes:
+      - ./couchdb/enlace-replicacion.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on: [couchdb]

@@ -1,3 +1,6 @@
 /target
 /.env
 /.env.local
+
+/scripts/__pycache__/
+/resultados/bad215-lab/

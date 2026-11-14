@@ -143,3 +143,66 @@ DOCKER_CONTEXT=desktop-linux python3 scripts/iniciar-couchdb.py --probar-e4
 El ensayo verifica los dos enlaces antes de la interrupción. Después los mantiene cortados durante una ventana común de 60 segundos y escribe un documento ficticio en CouchDB local. Durante el corte, el puerto del intermediario HTTP rechaza conexiones, la API directa responde y el documento se lee en CouchDB local mientras CouchDB central devuelve HTTP 404 para su ID.
 
 Al restablecer los enlaces, el ensayo comprueba HTTP 200 a través del intermediario cliente → API y verifica que el mismo trabajo de replicación entrega a la central el documento con su ID, revisión y contenido. La salida esperada termina con `Ensayo E4 de infraestructura completado.` La prueba de validación y aplicación de operaciones de citas requiere el módulo de negocio integrado.
+
+### Laboratorio de red E0–E4 y cliente offline
+
+El laboratorio usa el proyecto Compose `bad215-laboratorio-red` con volúmenes propios. CouchDB central se publica en `127.0.0.1:16086` y CouchDB local en `127.0.0.1:16087`. El backend del laboratorio usa CouchDB central directamente. El cliente y k6 acceden a la API por el proxy de `127.0.0.1:18081`. La API directa en `127.0.0.1:18082` permite verificar la disponibilidad interna durante un corte.
+
+Desde la raíz, en Linux con Docker Desktop, Compose 2.24.4 o superior, y la herramienta Rust del repositorio:
+
+```bash
+export DOCKER_CONTEXT=desktop-linux
+CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 cargo build --locked
+python3 scripts/laboratorio-red.py iniciar
+python3 scripts/laboratorio-red.py restaurar
+curl --noproxy '*' -fsS http://127.0.0.1:18081/api/ready
+```
+
+Si usás Docker Engine sin Docker Desktop, omití la primera línea. Después de modificar Rust, repetí la compilación y recreá `api-laboratorio` junto con su proxy para cargar el binario nuevo. Por ejemplo, detené el proyecto con el comando de cierre de esta sección y volvé a ejecutar `iniciar`.
+
+`restaurar` elimina y recrea únicamente `bad215_lab_citas` y `bad215_lab_operaciones` en las dos instancias del proyecto de laboratorio. Verifica 255 documentos ficticios por instancia en la primera base (10 empleados, 5 servicios, 120 clientes y 120 citas del 20 de noviembre de 2026, hora de El Salvador) y cero en la segunda. El generador usa semilla 42. Ejecutá la restauración antes de cada repetición con k6 y el simulador detenidos.
+
+#### Perfiles para pruebas HTTP
+
+```bash
+python3 scripts/laboratorio-red.py perfil E1 --calibrar
+python3 scripts/laboratorio-red.py perfil E2
+python3 scripts/laboratorio-red.py perfil E3 --arquitectura monolitica
+python3 scripts/laboratorio-red.py perfil E0
+```
+
+| Perfil | Retardo por paquete de salida | Pérdida | Tasa |
+|---|---:|---:|---:|
+| E0 | 0 ms | 0 % | Libre |
+| E1 | 50 ms | 1 % | 10 Mbps |
+| E2 | 150 ms | 5 % | 2 Mbps |
+| E3 | 300 ms | 10 % | 512 Kbps |
+| E4 | No aplica | 100 % durante 60 s | Enlace interrumpido |
+
+El ajuste se aplica a `eth0` dentro de los proxies del proyecto. La variante distribuida aplica el perfil a los proxies cliente → API y CouchDB local → central. `--arquitectura monolitica` aplica el perfil al proxy cliente → API y deja el de replicación en E0. El ajuste de salida del proxy puede afectar ambos sentidos de un intercambio, por lo que `--calibrar` registra cinco mediciones HTTP de ida y vuelta, con tiempo y resultado. Se requiere que el kernel de Docker incluya el qdisc `netem`.
+
+E1–E3 siguen activos hasta ejecutar otro perfil o detener el proyecto. `perfil E4` revierte el corte por sí mismo después de 60 s. Para alinearlo con k6 en la variante monolítica, ejecutalo al segundo 60 de su medición. Los comandos y las marcas UTC en milisegundos quedan en `resultados/bad215-lab/tc.log`. Usá `--log RUTA/tc.log` para elegir el archivo de una repetición.
+
+#### Ensayo offline distribuido
+
+Prueba breve de la infraestructura con dos usuarios simulados:
+
+```bash
+python3 scripts/laboratorio-red.py offline --usuarios 2 --antes 3 --corte 6 --despues 3
+```
+
+Para la duración del protocolo, restaurá el estado inicial y ejecutá `python3 scripts/laboratorio-red.py offline --usuarios 10`. El ensayo genera una operación por segundo por usuario, con 60 s antes del corte, 60 s de corte y 60 s después, más hasta 120 s de verificación. El corte integrado en este comando controla ambos enlaces. Usá `--salida RUTA` para colocar los archivos en la carpeta de una repetición. Cada escritura lógica OP2 u OP3 tiene un UUID v4 como `op_id` y `_id`, más `ts_cliente`, `vu` e `iteracion`. Cada segundo se agrupan las escrituras del simulador en una petición `_bulk_docs` a CouchDB local. La replicación continua traslada los documentos de operación de la ejecución y se cancela al terminar.
+
+- `ids.csv` conserva cada intento y cada confirmación con su marca de tiempo y SHA-256 del documento.
+- `tc.log` registra la interrupción, el restablecimiento y la primera respuesta satisfactoria de la API.
+- `verificacion.json` registra conteos por fase, IDs pendientes, duplicados, conflictos, diferencias de contenido y el tiempo de sincronización del lote del corte.
+- `entorno.txt` registra el commit, la semilla, la duración, la versión de Compose y los límites de los servicios.
+
+El resultado verifica persistencia y replicación de documentos de operación. La aplicación de OP2 y OP3 a las citas con las reglas de Rust se valida durante la integración con el módulo de citas. Las métricas de k6 y de recursos se agregan durante la campaña.
+
+Para apagar el laboratorio conservando sus volúmenes:
+
+```bash
+docker compose -p bad215-laboratorio-red --env-file .env --env-file .env.local \
+  -f compose.yaml -f compose.local.yaml -f compose.laboratorio.yaml down
+```
