@@ -131,3 +131,15 @@ Si Rust usa otro puerto, añade `--puerto-api` con su valor. El intermediario se
 - [Contrato de API](CONTRATO_API.md)
 - [Instalación en Docker](https://docs.couchdb.org/en/stable/install/docker.html)
 - [Configuración de CouchDB en nodo único](https://docs.couchdb.org/en/stable/setup/single-node.html)
+
+### Ensayo E4 de infraestructura con ambos enlaces
+
+Con CouchDB central, CouchDB local y la API Rust activos, ejecuta:
+
+```bash
+DOCKER_CONTEXT=desktop-linux python3 scripts/iniciar-couchdb.py --probar-e4
+```
+
+El ensayo verifica los dos enlaces antes de la interrupción. Después los mantiene cortados durante una ventana común de 60 segundos y escribe un documento ficticio en CouchDB local. Durante el corte, el puerto del intermediario HTTP rechaza conexiones, la API directa responde y el documento se lee en CouchDB local mientras CouchDB central devuelve HTTP 404 para su ID.
+
+Al restablecer los enlaces, el ensayo comprueba HTTP 200 a través del intermediario cliente → API y verifica que el mismo trabajo de replicación entrega a la central el documento con su ID, revisión y contenido. La salida esperada termina con `Ensayo E4 de infraestructura completado.` La prueba de validación y aplicación de operaciones de citas requiere el módulo de negocio integrado.

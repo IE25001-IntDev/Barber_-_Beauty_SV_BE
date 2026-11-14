@@ -267,7 +267,10 @@ read -r protocolo codigo resto <&3 && [[ "$protocolo" == HTTP/* && "$codigo" == 
     raise RuntimeError("CouchDB local no pudo obtener HTTP 200 a través del enlace de replicación.")
 
 
-def probar_corte(segundos):
+def probar_corte(segundos, *, puerto_api=None):
+    if puerto_api is not None:
+        verificar_api(puerto_api, "Acceso directo a la API")
+
     local, central, origen, destino = instancias_replicacion()
     puerto_local, base_local, credencial_local = origen
     _, base_central, _ = destino
@@ -297,10 +300,21 @@ def probar_corte(segundos):
         esperar_documento(destino, control, 45)
         print("Antes del corte: documento de control confirmado en central.", flush=True)
 
+        puerto_cliente = None
+        if puerto_api is not None:
+            with enlace_api(puerto_api) as puerto_cliente:
+                verificar_api(puerto_cliente, "Enlace cliente → API antes del corte")
+                print("Antes del corte: HTTP 200 a través del enlace cliente → API.", flush=True)
+
         try:
             operar_enlace("stop", "--timeout", "2")
             inicio = time.monotonic()
-            print(f"{datetime.now(timezone.utc).isoformat()} Enlace interrumpido.", flush=True)
+            enlaces = "Ambos enlaces" if puerto_cliente is not None else "Enlace de replicación"
+            print(f"{datetime.now(timezone.utc).isoformat()} {enlaces}: inicio del corte.", flush=True)
+            if puerto_cliente is not None:
+                verificar_corte_api(puerto_cliente)
+                verificar_api(puerto_api, "Acceso directo durante el corte")
+                print("Durante el corte: enlace cliente → API inaccesible, Rust directo HTTP 200.", flush=True)
             pendiente = guardar_prueba(origen, id_corte, op_corte)
             esperar_documento(origen, pendiente, 5)
             codigo, _ = leer_prueba(destino, id_corte)
@@ -308,11 +322,17 @@ def probar_corte(segundos):
                 raise RuntimeError(f"Durante el corte se esperaba HTTP 404 y se obtuvo {codigo}.")
             print(f"Durante el corte: local HTTP 200 y central HTTP 404 para {id_corte}.", flush=True)
             time.sleep(max(0, segundos - (time.monotonic() - inicio)))
+            if puerto_cliente is not None:
+                verificar_corte_api(puerto_cliente)
         finally:
             operar_enlace("start")
 
         recuperado = time.monotonic()
         print(f"{datetime.now(timezone.utc).isoformat()} Enlace restablecido.", flush=True)
+        if puerto_cliente is not None:
+            with enlace_api(puerto_api, puerto_cliente):
+                verificar_api(puerto_cliente, "Enlace cliente → API recuperado")
+                print("Después del corte: enlace cliente → API HTTP 200.", flush=True)
         esperar_documento(destino, pendiente, 120)
         print(f"Central: HTTP 200, misma revisión y contenido. Recuperación: {time.monotonic() - recuperado:.2f} s.")
     finally:
@@ -333,7 +353,10 @@ def probar_corte(segundos):
                 raise
             print(f"No se confirmó la cancelación de la replicación: {error}", file=sys.stderr)
 
-    print("Prueba de recuperación local → central completada.")
+    print(
+        "Ensayo E4 de infraestructura completado."
+        if puerto_api is not None else "Prueba de recuperación local → central completada."
+    )
 
 
 @contextmanager
@@ -411,7 +434,8 @@ def main():
     modos.add_argument("--replicar-prueba", action="store_true", help="Replica un documento ficticio.")
     modos.add_argument("--probar-corte", action="store_true", help="Prueba recuperación tras un corte de 60 segundos.")
     modos.add_argument("--probar-corte-api", action="store_true", help="Interrumpe el enlace cliente → API durante 60 segundos.")
-    parser.add_argument("--puerto-api", type=int, default=18080, help="Puerto local de Rust para --probar-corte-api.")
+    modos.add_argument("--probar-e4", action="store_true", help="Prueba ambos enlaces durante un corte común de 60 segundos.")
+    parser.add_argument("--puerto-api", type=int, default=18080, help="Puerto local de Rust para --probar-corte-api y --probar-e4.")
     args = parser.parse_args()
     if not 1 <= args.puerto_api <= 65535:
         parser.error("--puerto-api debe estar entre 1 y 65535.")
@@ -430,6 +454,8 @@ def main():
             probar_corte(60)
         elif args.probar_corte_api:
             probar_corte_api(args.puerto_api, 60)
+        elif args.probar_e4:
+            probar_corte(60, puerto_api=args.puerto_api)
         else:
             iniciar(compose, servicio, archivo_env, variable)
     except FileNotFoundError as error:
@@ -448,7 +474,9 @@ def main():
         print("Prueba interrumpida.", file=sys.stderr)
         sys.exit(130)
     except (OSError, RuntimeError, ValueError, http.client.HTTPException) as error:
-        componente = "el enlace cliente → API" if args.probar_corte_api else "CouchDB"
+        componente = "el ensayo E4" if args.probar_e4 else "CouchDB"
+        if args.probar_corte_api:
+            componente = "el enlace cliente → API"
         print(f"No se pudo verificar {componente}. {error}", file=sys.stderr)
         sys.exit(1)
 
