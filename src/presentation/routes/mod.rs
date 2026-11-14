@@ -14,7 +14,10 @@ pub fn router(couchdb: CouchDb) -> Router {
             "/api/citas",
             get(appointment_controller::list).post(appointment_controller::create),
         )
-        .route("/api/citas/{id}", get(appointment_controller::get_by_id))
+        .route(
+            "/api/citas/{id}",
+            get(appointment_controller::get_by_id).put(appointment_controller::update_status),
+        )
         .route("/api/empleados", get(catalog_controller::list_employees))
         .route("/api/servicios", get(catalog_controller::list_services))
         .with_state(couchdb)

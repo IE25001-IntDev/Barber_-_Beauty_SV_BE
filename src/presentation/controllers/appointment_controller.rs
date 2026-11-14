@@ -11,12 +11,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     application::services::appointment_service::{
-        CreateAppointmentError, ListAppointmentsError, create_appointment, get_appointment,
-        list_appointments,
+        CreateAppointmentError, ListAppointmentsError, UpdateAppointmentError, create_appointment,
+        get_appointment, list_appointments, update_appointment_status,
     },
     domain::{
-        entities::appointment::{Appointment, NewAppointment},
-        repositories::RepositoryReadError,
+        entities::appointment::{Appointment, AppointmentStatusChange, NewAppointment},
+        repositories::{AppointmentUpdateError, RepositoryReadError},
     },
     infrastructure::{
         database::couchdb::CouchDb,
@@ -64,21 +64,13 @@ pub async fn get_by_id(
     path: Result<Path<String>, PathRejection>,
 ) -> Response {
     let Ok(Path(id)) = path else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "CITA_ID_INVALIDO",
-            "Envía un identificador de cita válido.",
-        );
+        return invalid_id();
     };
 
     let repository = CouchDbAppointmentRepository(&couchdb);
     match get_appointment(&repository, &id).await {
         Ok(Some(appointment)) => Json(appointment).into_response(),
-        Ok(None) => error_response(
-            StatusCode::NOT_FOUND,
-            "CITA_NO_ENCONTRADA",
-            "No se encontró la cita solicitada",
-        ),
+        Ok(None) => not_found(),
         Err(error) => repository_error(error),
     }
 }
@@ -104,25 +96,7 @@ pub async fn create(
 ) -> Response {
     let request = match body {
         Ok(Json(request)) => request,
-        Err(error) => {
-            let status = error.status();
-            let (code, message) = match status {
-                StatusCode::UNSUPPORTED_MEDIA_TYPE => (
-                    "TIPO_CONTENIDO_INVALIDO",
-                    "Envía la cita con Content-Type: application/json.",
-                ),
-                StatusCode::UNPROCESSABLE_ENTITY => (
-                    "CITA_INVALIDA",
-                    "Revisa los campos y tipos de datos de la cita.",
-                ),
-                StatusCode::PAYLOAD_TOO_LARGE => (
-                    "SOLICITUD_DEMASIADO_GRANDE",
-                    "El cuerpo de la solicitud excede el tamaño permitido.",
-                ),
-                _ => ("JSON_INVALIDO", "Envía un cuerpo JSON válido."),
-            };
-            return error_response(status, code, message);
-        }
+        Err(error) => return json_error(error),
     };
 
     let repository = CouchDbAppointmentRepository(&couchdb);
@@ -135,11 +109,7 @@ pub async fn create(
             "CITA_INVALIDA",
             "Envía un UUID v4 para la cita y valores no vacíos para cliente, empleado y servicio.",
         ),
-        Err(CreateAppointmentError::InvalidTrace) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "TRAZABILIDAD_INVALIDA",
-            "Envía juntos op_id (UUID v4), ts_cliente, vu (positivo) e iteracion.",
-        ),
+        Err(CreateAppointmentError::InvalidTrace) => return invalid_trace(),
         Err(CreateAppointmentError::EmployeeUnavailable) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             "EMPLEADO_NO_DISPONIBLE",
@@ -155,6 +125,84 @@ pub async fn create(
             "CITA_EN_CONFLICTO",
             "El identificador de cita ya está en uso.",
         ),
+    };
+    error_response(status, code, message)
+}
+
+pub async fn update_status(
+    State(couchdb): State<CouchDb>,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<AppointmentStatusChange>, JsonRejection>,
+) -> Response {
+    let Ok(Path(id)) = path else {
+        return invalid_id();
+    };
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(error) => return json_error(error),
+    };
+
+    let repository = CouchDbAppointmentRepository(&couchdb);
+    match update_appointment_status(&repository, &id, request).await {
+        Ok(appointment) => Json(appointment).into_response(),
+        Err(UpdateAppointmentError::InvalidTrace) => invalid_trace(),
+        Err(UpdateAppointmentError::Repository(error)) => match error {
+            AppointmentUpdateError::NotFound => not_found(),
+            AppointmentUpdateError::Read(error) => repository_error(error),
+            AppointmentUpdateError::InvalidTransition => error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "TRANSICION_ESTADO_INVALIDA",
+                "Una cita pendiente puede pasar a completada o cancelada.",
+            ),
+            AppointmentUpdateError::Conflict => error_response(
+                StatusCode::CONFLICT,
+                "CITA_EN_CONFLICTO",
+                "La cita cambió durante la escritura o el op_id ya está en uso.",
+            ),
+        },
+    }
+}
+
+fn not_found() -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        "CITA_NO_ENCONTRADA",
+        "No se encontró la cita solicitada",
+    )
+}
+
+fn invalid_id() -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        "CITA_ID_INVALIDO",
+        "Envía un identificador de cita válido.",
+    )
+}
+
+fn invalid_trace() -> Response {
+    error_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "TRAZABILIDAD_INVALIDA",
+        "Envía juntos op_id (UUID v4), ts_cliente, vu (positivo) e iteracion.",
+    )
+}
+
+fn json_error(error: JsonRejection) -> Response {
+    let status = error.status();
+    let (code, message) = match status {
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => (
+            "TIPO_CONTENIDO_INVALIDO",
+            "Envía la cita con Content-Type: application/json.",
+        ),
+        StatusCode::UNPROCESSABLE_ENTITY => (
+            "CITA_INVALIDA",
+            "Revisa los campos y tipos de datos de la cita.",
+        ),
+        StatusCode::PAYLOAD_TOO_LARGE => (
+            "SOLICITUD_DEMASIADO_GRANDE",
+            "El cuerpo de la solicitud excede el tamaño permitido.",
+        ),
+        _ => ("JSON_INVALIDO", "Envía un cuerpo JSON válido."),
     };
     error_response(status, code, message)
 }

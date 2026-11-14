@@ -143,6 +143,13 @@ impl CouchDb {
             .json(document)
     }
 
+    pub(crate) fn save_document(&self, document: &Value) -> RequestBuilder {
+        self.client
+            .post(self.database_url.clone())
+            .basic_auth(&self.user, Some(&self.password))
+            .json(document)
+    }
+
     pub async fn database_available(&self) -> bool {
         self.client
             .head(self.database_url.clone())

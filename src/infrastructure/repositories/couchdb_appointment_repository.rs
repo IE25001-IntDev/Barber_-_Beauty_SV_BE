@@ -1,12 +1,15 @@
 use chrono::{DateTime, Datelike, Duration, Utc};
 use reqwest::StatusCode;
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 
 use crate::{
     domain::{
-        entities::appointment::{Appointment, AppointmentStatus, CreationTrace, NewAppointment},
-        repositories::{AppointmentInsertError, AppointmentRepository, RepositoryReadError},
+        entities::appointment::{Appointment, AppointmentStatus, NewAppointment, OperationTrace},
+        repositories::{
+            AppointmentInsertError, AppointmentRepository, AppointmentUpdateError,
+            RepositoryReadError,
+        },
     },
     infrastructure::database::couchdb::CouchDb,
 };
@@ -24,7 +27,7 @@ struct AppointmentDocument {
     estado: AppointmentStatus,
     precio_centavos: u64,
     #[serde(default)]
-    creacion: Option<CreationTrace>,
+    creacion: Option<OperationTrace>,
 }
 
 impl From<AppointmentDocument> for Appointment {
@@ -42,10 +45,10 @@ impl From<AppointmentDocument> for Appointment {
 }
 
 impl CouchDbAppointmentRepository<'_> {
-    async fn find_document(
+    async fn find_document<T: DeserializeOwned>(
         &self,
         id: &str,
-    ) -> Result<Option<AppointmentDocument>, RepositoryReadError> {
+    ) -> Result<Option<T>, RepositoryReadError> {
         let query = json!({
             "selector": {
                 "_id": {"$eq": id},
@@ -55,27 +58,90 @@ impl CouchDbAppointmentRepository<'_> {
             "limit": 1
         });
 
-        Ok(self
-            .0
-            .find_page::<AppointmentDocument>(&query)
-            .await?
-            .docs
-            .pop())
+        Ok(self.0.find_page::<T>(&query).await?.docs.pop())
     }
 }
 
 impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
+    async fn update_status(
+        &self,
+        id: &str,
+        status: AppointmentStatus,
+        trace: Option<&OperationTrace>,
+    ) -> Result<Appointment, AppointmentUpdateError> {
+        let mut document = self
+            .find_document::<Value>(id)
+            .await
+            .map_err(AppointmentUpdateError::Read)?
+            .ok_or(AppointmentUpdateError::NotFound)?;
+        let invalid_data = || AppointmentUpdateError::Read(RepositoryReadError::InvalidData);
+        let stored: AppointmentDocument =
+            serde_json::from_value(document.clone()).map_err(|_| invalid_data())?;
+        let previous_update: Option<OperationTrace> =
+            serde_json::from_value(document["actualizacion_estado"].clone())
+                .map_err(|_| invalid_data())?;
+        let mut appointment = Appointment::from(stored);
+
+        if let Some(trace) = trace {
+            if previous_update
+                .as_ref()
+                .is_some_and(|previous| previous.op_id == trace.op_id)
+            {
+                return if previous_update.as_ref() == Some(trace) && appointment.estado == status {
+                    Ok(appointment)
+                } else {
+                    Err(AppointmentUpdateError::Conflict)
+                };
+            }
+            if document["creacion"]["op_id"].as_str() == Some(trace.op_id.as_str()) {
+                return Err(AppointmentUpdateError::Conflict);
+            }
+        } else if appointment.estado == status {
+            return Ok(appointment);
+        }
+
+        if !appointment.estado.can_transition_to(status) {
+            return Err(AppointmentUpdateError::InvalidTransition);
+        }
+
+        if document["_rev"].as_str().is_none_or(str::is_empty) {
+            return Err(invalid_data());
+        }
+        document["estado"] = json!(status);
+        if let Some(trace) = trace {
+            document["actualizacion_estado"] = json!(trace);
+        }
+        let unavailable = || AppointmentUpdateError::Read(RepositoryReadError::Unavailable);
+        let response = self
+            .0
+            .save_document(&document)
+            .send()
+            .await
+            .map_err(|_| unavailable())?;
+        match response.status() {
+            StatusCode::CREATED | StatusCode::ACCEPTED => {
+                appointment.estado = status;
+                Ok(appointment)
+            }
+            StatusCode::CONFLICT => Err(AppointmentUpdateError::Conflict),
+            _ => Err(unavailable()),
+        }
+    }
+
     async fn find_by_id(&self, id: &str) -> Result<Option<Appointment>, RepositoryReadError> {
-        Ok(self.find_document(id).await?.map(Appointment::from))
+        Ok(self
+            .find_document::<AppointmentDocument>(id)
+            .await?
+            .map(Appointment::from))
     }
 
     async fn find_creation(
         &self,
         request: &NewAppointment,
-        trace: &CreationTrace,
+        trace: &OperationTrace,
     ) -> Result<Option<Appointment>, AppointmentInsertError> {
         let Some(document) = self
-            .find_document(&request.id)
+            .find_document::<AppointmentDocument>(&request.id)
             .await
             .map_err(AppointmentInsertError::Read)?
         else {
@@ -95,7 +161,7 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
     async fn insert(
         &self,
         appointment: Appointment,
-        trace: Option<&CreationTrace>,
+        trace: Option<&OperationTrace>,
     ) -> Result<Appointment, AppointmentInsertError> {
         let mut document = json!({
             "tipo": "cita",

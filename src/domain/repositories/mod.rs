@@ -3,7 +3,7 @@ use std::future::Future;
 use chrono::{DateTime, Utc};
 
 use crate::domain::entities::{
-    appointment::{Appointment, CreationTrace, NewAppointment},
+    appointment::{Appointment, AppointmentStatus, NewAppointment, OperationTrace},
     barber::Barber,
     service::Service,
 };
@@ -18,17 +18,31 @@ pub enum AppointmentInsertError {
     Read(RepositoryReadError),
 }
 
+pub enum AppointmentUpdateError {
+    NotFound,
+    InvalidTransition,
+    Conflict,
+    Read(RepositoryReadError),
+}
+
 pub trait AppointmentRepository {
+    fn update_status(
+        &self,
+        id: &str,
+        status: AppointmentStatus,
+        trace: Option<&OperationTrace>,
+    ) -> impl Future<Output = Result<Appointment, AppointmentUpdateError>> + Send;
+
     fn find_creation(
         &self,
         request: &NewAppointment,
-        trace: &CreationTrace,
+        trace: &OperationTrace,
     ) -> impl Future<Output = Result<Option<Appointment>, AppointmentInsertError>> + Send;
 
     fn insert(
         &self,
         appointment: Appointment,
-        trace: Option<&CreationTrace>,
+        trace: Option<&OperationTrace>,
     ) -> impl Future<Output = Result<Appointment, AppointmentInsertError>> + Send;
 
     fn find_by_id(

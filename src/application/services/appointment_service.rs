@@ -2,9 +2,12 @@ use chrono::{NaiveDate, TimeZone, Utc};
 use chrono_tz::America::El_Salvador;
 
 use crate::domain::{
-    entities::appointment::{Appointment, AppointmentStatus, CreationTrace, NewAppointment},
+    entities::appointment::{
+        Appointment, AppointmentStatus, AppointmentStatusChange, NewAppointment, OperationTrace,
+    },
     repositories::{
-        AppointmentCatalog, AppointmentInsertError, AppointmentRepository, RepositoryReadError,
+        AppointmentCatalog, AppointmentInsertError, AppointmentRepository, AppointmentUpdateError,
+        RepositoryReadError,
     },
 };
 
@@ -77,23 +80,13 @@ pub async fn create_appointment(
         return Err(CreateAppointmentError::InvalidFields);
     }
 
-    let trace = match (
-        &request.op_id,
+    let trace = operation_trace(
+        request.op_id.as_deref(),
         request.ts_cliente,
         request.vu,
         request.iteracion,
-    ) {
-        (None, None, None, None) => None,
-        (Some(op_id), Some(ts_cliente), Some(vu), Some(iteracion)) if vu > 0 => {
-            Some(CreationTrace {
-                op_id: uuid_v4(op_id).ok_or(CreateAppointmentError::InvalidTrace)?,
-                ts_cliente,
-                vu,
-                iteracion,
-            })
-        }
-        _ => return Err(CreateAppointmentError::InvalidTrace),
-    };
+    )
+    .map_err(|()| CreateAppointmentError::InvalidTrace)?;
 
     if let Some(trace) = &trace
         && let Some(appointment) = repository
@@ -151,4 +144,48 @@ fn uuid_v4(value: &str) -> Option<String> {
         && parsed.get_variant() == uuid::Variant::RFC4122
         && canonical.eq_ignore_ascii_case(value))
     .then_some(canonical)
+}
+
+pub enum UpdateAppointmentError {
+    InvalidTrace,
+    Repository(AppointmentUpdateError),
+}
+
+pub async fn update_appointment_status(
+    repository: &impl AppointmentRepository,
+    id: &str,
+    request: AppointmentStatusChange,
+) -> Result<Appointment, UpdateAppointmentError> {
+    let trace = operation_trace(
+        request.op_id.as_deref(),
+        request.ts_cliente,
+        request.vu,
+        request.iteracion,
+    )
+    .map_err(|()| UpdateAppointmentError::InvalidTrace)?;
+
+    repository
+        .update_status(id, request.estado, trace.as_ref())
+        .await
+        .map_err(UpdateAppointmentError::Repository)
+}
+
+fn operation_trace(
+    op_id: Option<&str>,
+    ts_cliente: Option<u64>,
+    vu: Option<u64>,
+    iteracion: Option<u64>,
+) -> Result<Option<OperationTrace>, ()> {
+    match (op_id, ts_cliente, vu, iteracion) {
+        (None, None, None, None) => Ok(None),
+        (Some(op_id), Some(ts_cliente), Some(vu), Some(iteracion)) if vu > 0 => {
+            Ok(Some(OperationTrace {
+                op_id: uuid_v4(op_id).ok_or(())?,
+                ts_cliente,
+                vu,
+                iteracion,
+            }))
+        }
+        _ => Err(()),
+    }
 }

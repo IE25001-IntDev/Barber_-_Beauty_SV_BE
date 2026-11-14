@@ -12,12 +12,21 @@ pub struct Appointment {
     pub precio_centavos: u64,
 }
 
-#[derive(Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppointmentStatus {
     Pendiente,
     Completada,
     Cancelada,
+}
+
+impl AppointmentStatus {
+    pub fn can_transition_to(self, target: Self) -> bool {
+        matches!(
+            (self, target),
+            (Self::Pendiente, Self::Completada | Self::Cancelada)
+        )
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -35,9 +44,19 @@ pub struct NewAppointment {
 }
 
 #[derive(Serialize, serde::Deserialize, PartialEq, Eq)]
-pub struct CreationTrace {
+pub struct OperationTrace {
     pub op_id: String,
     pub ts_cliente: u64,
     pub vu: u64,
     pub iteracion: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppointmentStatusChange {
+    pub estado: AppointmentStatus,
+    pub op_id: Option<String>,
+    pub ts_cliente: Option<u64>,
+    pub vu: Option<u64>,
+    pub iteracion: Option<u64>,
 }
