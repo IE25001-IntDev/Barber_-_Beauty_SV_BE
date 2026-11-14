@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use reqwest::{Client, StatusCode, Url, redirect::Policy};
+use reqwest::{Client, RequestBuilder, StatusCode, Url, redirect::Policy};
 
 #[derive(Clone)]
 pub struct CouchDb {
@@ -63,6 +63,18 @@ impl CouchDb {
             user,
             password,
         })
+    }
+
+    pub(crate) fn find(&self, query: &serde_json::Value) -> RequestBuilder {
+        let mut url = self.database_url.clone();
+        url.path_segments_mut()
+            .expect("la URL de CouchDB admite segmentos de ruta")
+            .push("_find");
+
+        self.client
+            .post(url)
+            .basic_auth(&self.user, Some(&self.password))
+            .json(query)
     }
 
     pub async fn database_available(&self) -> bool {
