@@ -148,6 +148,7 @@ pub async fn create(
 }
 
 pub async fn update_status(
+    Extension(percentage): Extension<u8>,
     State(couchdb): State<CouchDb>,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<AppointmentStatusChange>, JsonRejection>,
@@ -161,9 +162,10 @@ pub async fn update_status(
     };
 
     let repository = CouchDbAppointmentRepository(&couchdb);
-    match update_appointment_status(&repository, &id, request).await {
+    match update_appointment_status(&repository, &crate::infrastructure::repositories::couchdb_commission_repository::CouchDbCommissionRepository(&couchdb), percentage, &id, request).await {
         Ok(appointment) => Json(appointment).into_response(),
         Err(UpdateAppointmentError::InvalidTrace) => invalid_trace(),
+        Err(UpdateAppointmentError::Commission(error)) => crate::presentation::controllers::commission_controller::repository_error(error),
         Err(UpdateAppointmentError::Repository(error)) => match error {
             AppointmentUpdateError::NotFound => not_found(),
             AppointmentUpdateError::Read(error) => repository_error(error),

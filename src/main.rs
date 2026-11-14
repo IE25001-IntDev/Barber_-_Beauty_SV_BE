@@ -21,6 +21,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "API BAD 215 disponible en http://{}",
         listener.local_addr()?
     );
-    axum::serve(listener, routes::router(couchdb)).await?;
+    axum::serve(
+        listener,
+        routes::router(couchdb, config.comision_porcentaje),
+    )
+    .await?;
     Ok(())
 }

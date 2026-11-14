@@ -76,3 +76,29 @@ pub trait AppointmentCatalog {
         id: &str,
     ) -> impl Future<Output = Result<Option<Service>, RepositoryReadError>> + Send;
 }
+
+pub trait CommissionRepository {
+    fn find_commission(
+        &self,
+        id: &str,
+    ) -> impl Future<
+        Output = Result<
+            Option<crate::domain::entities::commission::Commission>,
+            RepositoryReadError,
+        >,
+    > + Send;
+    // Solo inserta: ante un conflicto devuelve el documento existente, sin actualizarlo.
+    fn insert_commission(
+        &self,
+        commission: crate::domain::entities::commission::Commission,
+    ) -> impl Future<
+        Output = Result<crate::domain::entities::commission::Commission, RepositoryReadError>,
+    > + Send;
+    fn list_generated_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> impl Future<
+        Output = Result<Vec<crate::domain::entities::commission::Commission>, RepositoryReadError>,
+    > + Send;
+}

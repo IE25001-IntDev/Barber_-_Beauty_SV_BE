@@ -56,3 +56,9 @@ Ambas rutas devuelven `{"status":"ok"}` cuando el proceso responde y la conexió
 - [Contrato de API](CONTRATO_API.md)
 - [Instalación en Docker](https://docs.couchdb.org/en/stable/install/docker.html)
 - [Configuración de CouchDB en nodo único](https://docs.couchdb.org/en/stable/setup/single-node.html)
+
+Las citas completadas generan una comisión con `COMISION_PORCENTAJE` (entero entre
+0 y 100, 40 por defecto). Se consulta por fecha local de generación mediante
+`GET /api/comisiones?desde=YYYY-MM-DD&hasta=YYYY-MM-DD`. Si falla el guardado de la
+comisión, reintenta el PUT de la cita con estado `completada`; la comisión existente
+se conserva. Ver los detalles y el redondeo en el contrato de API.
