@@ -46,7 +46,7 @@ pub async fn list_appointments(
         .map_err(ListAppointmentsError::Repository)
 }
 
-fn start_of_day(day: NaiveDate) -> Option<chrono::DateTime<Utc>> {
+pub(super) fn start_of_day(day: NaiveDate) -> Option<chrono::DateTime<Utc>> {
     let midnight = day.and_hms_opt(0, 0, 0)?;
     El_Salvador
         .from_local_datetime(&midnight)
@@ -221,11 +221,14 @@ fn uuid_v4(value: &str) -> Option<String> {
 
 pub enum UpdateAppointmentError {
     InvalidTrace,
+    Commission(RepositoryReadError),
     Repository(AppointmentUpdateError),
 }
 
 pub async fn update_appointment_status(
     repository: &impl AppointmentRepository,
+    commissions: &impl crate::domain::repositories::CommissionRepository,
+    percentage: u8,
     id: &str,
     request: AppointmentStatusChange,
 ) -> Result<Appointment, UpdateAppointmentError> {
@@ -237,10 +240,16 @@ pub async fn update_appointment_status(
     )
     .map_err(|()| UpdateAppointmentError::InvalidTrace)?;
 
-    repository
+    let appointment = repository
         .update_status(id, request.estado, trace.as_ref())
         .await
-        .map_err(UpdateAppointmentError::Repository)
+        .map_err(UpdateAppointmentError::Repository)?;
+    if appointment.estado == AppointmentStatus::Completada {
+        super::commission_service::ensure_commission(commissions, &appointment, percentage)
+            .await
+            .map_err(UpdateAppointmentError::Commission)?;
+    }
+    Ok(appointment)
 }
 
 fn operation_trace(

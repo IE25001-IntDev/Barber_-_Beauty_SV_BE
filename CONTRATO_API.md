@@ -111,3 +111,32 @@ El cuerpo de error usa un código estable y un mensaje breve. Por ejemplo, `{"er
 - Apache CouchDB, [API de documentos y revisiones](https://docs.couchdb.org/en/stable/api/document/common.html).
 - Apache CouchDB, [protocolo de replicación](https://docs.couchdb.org/en/stable/replication/protocol.html).
 - IETF, [RFC 9110, semántica HTTP](https://www.rfc-editor.org/rfc/rfc9110.html).
+
+## Comisiones
+
+Al completar una cita con `PUT /api/citas/{id}`, la API asegura una comisión calculada
+sobre `precio_centavos` de la cita. `COMISION_PORCENTAJE` configura un porcentaje entero
+general entre 0 y 100 (40 por defecto); un valor inválido impide arrancar la API.
+El cálculo usa enteros y redondea al centavo más cercano, con mitades hacia arriba.
+
+CouchDB conserva un solo documento `tipo: "comision"`, con `_id: "comision:{cita_id}"`,
+`cita_id`, `empleado_id`, `porcentaje`, `monto_centavos` y `fecha_generacion` en UTC.
+La API expone el identificador como `id`. Una comisión existente nunca se recalcula
+ni se sobrescribe, aunque cambie la configuración.
+
+La cita y la comisión se guardan por separado. Si falla la comisión después de
+completar la cita, el PUT devuelve 503 (`COUCHDB_NO_DISPONIBLE`) ante errores de acceso,
+o 500 (`COMISIONES_NO_DISPONIBLES`) ante datos inválidos. Reintentar el mismo PUT con
+`estado: "completada"` asegura la comisión pendiente; admite el mismo `op_id` y la
+misma trazabilidad original, o un cuerpo sin trazabilidad. Si la escritura anterior
+sí llegó a CouchDB, el reintento conserva ese documento. La fecha de generación
+corresponde al intento que crea la comisión, no a la fecha de la cita.
+
+`GET /api/comisiones?desde=2026-11-01&hasta=2026-11-30` devuelve
+`{"items":[{"id":"comision:...","cita_id":"...","empleado_id":"...","porcentaje":40,"monto_centavos":400,"fecha_generacion":"2026-11-14T18:00:00Z"}]}`.
+Los dos parámetros son obligatorios, con formato estricto `YYYY-MM-DD` y `desde <= hasta`;
+si son inválidos devuelve 400 (`FECHA_INVALIDA`). El rango incluye ambos días en
+`America/El_Salvador`: desde medianoche del primer día hasta, sin incluir, medianoche
+del día siguiente a `hasta`. Filtra por `fecha_generacion` y ordena por ella y por ID.
+Sin resultados devuelve `{"items":[]}`. Los errores de CouchDB usan los mismos
+códigos 503/500 descritos arriba.

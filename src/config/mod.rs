@@ -6,6 +6,7 @@ use std::{
 };
 
 pub struct Config {
+    pub comision_porcentaje: u8,
     pub api_addr: SocketAddr,
     pub couchdb_url: String,
     pub couchdb_database: String,
@@ -26,7 +27,11 @@ impl Config {
             .filter(|port| *port != 0)
             .ok_or_else(|| "API_PORT debe estar entre 1 y 65535.".to_owned())?;
 
+        let comision_porcentaje =
+            parse_percentage(&value(&dotenv, "COMISION_PORCENTAJE", Some("40"))?)?;
+
         Ok(Self {
+            comision_porcentaje,
             api_addr: SocketAddr::new(host, port),
             couchdb_url: value(&dotenv, "COUCHDB_URL", None)?,
             couchdb_database: value(&dotenv, "COUCHDB_DATABASE", None)?,
@@ -65,4 +70,29 @@ fn value(
     setting
         .filter(|setting| !setting.trim().is_empty())
         .ok_or_else(|| format!("Define {key} en el entorno o en .env."))
+}
+
+fn parse_percentage(value: &str) -> Result<u8, String> {
+    value
+        .parse::<u8>()
+        .ok()
+        .filter(|v| *v <= 100)
+        .ok_or_else(|| "COMISION_PORCENTAJE debe ser un entero entre 0 y 100.".into())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn percentage_validation() {
+        for value in ["0", "40", "100"] {
+            assert!(parse_percentage(value).is_ok());
+        }
+        for value in ["-1", "101", "256", "40.5", ""] {
+            assert!(parse_percentage(value).is_err());
+        }
+        assert_eq!(
+            value(&HashMap::new(), "COMISION_TEST_DEFAULT", Some("40")).unwrap(),
+            "40"
+        );
+    }
 }

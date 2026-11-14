@@ -6,10 +6,12 @@ use tokio::sync::Mutex;
 
 use crate::{
     infrastructure::database::couchdb::CouchDb,
-    presentation::controllers::{appointment_controller, catalog_controller},
+    presentation::controllers::{
+        appointment_controller, catalog_controller, commission_controller,
+    },
 };
 
-pub fn router(couchdb: CouchDb) -> Router {
+pub fn router(couchdb: CouchDb, percentage: u8) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/ready", get(ready))
@@ -21,6 +23,8 @@ pub fn router(couchdb: CouchDb) -> Router {
             "/api/citas/{id}",
             get(appointment_controller::get_by_id).put(appointment_controller::update_status),
         )
+        .route("/api/comisiones", get(commission_controller::list))
+        .layer(Extension(percentage))
         .route("/api/empleados", get(catalog_controller::list_employees))
         .route("/api/servicios", get(catalog_controller::list_services))
         .layer(Extension(Arc::new(Mutex::new(()))))
