@@ -1,5 +1,36 @@
 use std::time::Duration;
 
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::{Value, json};
+
+use crate::domain::repositories::RepositoryReadError;
+
+const PAGE_SIZE: usize = 100;
+
+#[derive(Deserialize)]
+pub(crate) struct FindPage<T> {
+    pub(crate) docs: Vec<T>,
+    bookmark: Option<String>,
+}
+
+impl<T> FindPage<T> {
+    pub(crate) fn advance(&self, query: &mut Value) -> Result<bool, RepositoryReadError> {
+        if self.docs.len() < PAGE_SIZE {
+            return Ok(false);
+        }
+
+        let bookmark = self
+            .bookmark
+            .as_deref()
+            .filter(|bookmark| {
+                !bookmark.is_empty() && query["bookmark"].as_str() != Some(*bookmark)
+            })
+            .ok_or(RepositoryReadError::InvalidData)?;
+        query["bookmark"] = json!(bookmark);
+        Ok(true)
+    }
+}
+
 use reqwest::{Client, RequestBuilder, StatusCode, Url, redirect::Policy};
 
 #[derive(Clone)]
@@ -65,7 +96,30 @@ impl CouchDb {
         })
     }
 
-    pub(crate) fn find(&self, query: &serde_json::Value) -> RequestBuilder {
+    pub(crate) async fn find_page<T: DeserializeOwned>(
+        &self,
+        query: &Value,
+    ) -> Result<FindPage<T>, RepositoryReadError> {
+        let response = self
+            .find(query)
+            .send()
+            .await
+            .map_err(|_| RepositoryReadError::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(RepositoryReadError::Unavailable);
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|_| RepositoryReadError::InvalidData)
+    }
+
+    pub(crate) fn paged_query(selector: Value) -> Value {
+        json!({"selector": selector, "limit": PAGE_SIZE})
+    }
+
+    fn find(&self, query: &Value) -> RequestBuilder {
         let mut url = self.database_url.clone();
         url.path_segments_mut()
             .expect("la URL de CouchDB admite segmentos de ruta")

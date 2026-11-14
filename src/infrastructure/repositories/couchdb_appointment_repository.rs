@@ -5,12 +5,10 @@ use serde_json::json;
 use crate::{
     domain::{
         entities::appointment::{Appointment, AppointmentStatus},
-        repositories::{AppointmentReadError, AppointmentRepository},
+        repositories::{AppointmentRepository, RepositoryReadError},
     },
     infrastructure::database::couchdb::CouchDb,
 };
-
-const PAGE_SIZE: usize = 100;
 
 pub struct CouchDbAppointmentRepository<'a>(pub &'a CouchDb);
 
@@ -40,14 +38,8 @@ impl From<AppointmentDocument> for Appointment {
     }
 }
 
-#[derive(Deserialize)]
-struct FindPage {
-    docs: Vec<AppointmentDocument>,
-    bookmark: Option<String>,
-}
-
 impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
-    async fn find_by_id(&self, id: &str) -> Result<Option<Appointment>, AppointmentReadError> {
+    async fn find_by_id(&self, id: &str) -> Result<Option<Appointment>, RepositoryReadError> {
         let query = json!({
             "selector": {
                 "_id": {"$eq": id},
@@ -58,7 +50,8 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
         });
 
         Ok(self
-            .find_page(&query)
+            .0
+            .find_page::<AppointmentDocument>(&query)
             .await?
             .docs
             .pop()
@@ -69,7 +62,7 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
         &self,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
-    ) -> Result<Vec<Appointment>, AppointmentReadError> {
+    ) -> Result<Vec<Appointment>, RepositoryReadError> {
         // Preselecciona por fecha escrita en el documento, incluso si usa
         // un desplazamiento RFC 3339. El filtro final compara instantes.
         let first_date = (start - Duration::days(1)).date_naive();
@@ -82,19 +75,16 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
             range["$lt"] = json!(after_last_date.format("%Y-%m-%d").to_string());
         }
 
-        let mut query = json!({
-            "selector": {
-                "inicio": range,
-                "cliente_nombre": {"$exists": true},
-                "servicio_id": {"$exists": true}
-            },
-            "limit": PAGE_SIZE
-        });
+        let mut query = CouchDb::paged_query(json!({
+            "inicio": range,
+            "cliente_nombre": {"$exists": true},
+            "servicio_id": {"$exists": true}
+        }));
 
         let mut appointments: Vec<Appointment> = Vec::new();
         loop {
-            let page = self.find_page(&query).await?;
-            let count = page.docs.len();
+            let page = self.0.find_page::<AppointmentDocument>(&query).await?;
+            let has_more = page.advance(&mut query)?;
             appointments.extend(
                 page.docs
                     .into_iter()
@@ -102,38 +92,12 @@ impl AppointmentRepository for CouchDbAppointmentRepository<'_> {
                     .map(Appointment::from),
             );
 
-            if count < PAGE_SIZE {
+            if !has_more {
                 break;
             }
-            let bookmark = page
-                .bookmark
-                .filter(|bookmark| {
-                    !bookmark.is_empty() && query["bookmark"].as_str() != Some(bookmark)
-                })
-                .ok_or(AppointmentReadError::InvalidData)?;
-            query["bookmark"] = json!(bookmark);
         }
 
         appointments.sort_unstable_by(|a, b| a.inicio.cmp(&b.inicio).then_with(|| a.id.cmp(&b.id)));
         Ok(appointments)
-    }
-}
-
-impl CouchDbAppointmentRepository<'_> {
-    async fn find_page(&self, query: &serde_json::Value) -> Result<FindPage, AppointmentReadError> {
-        let response = self
-            .0
-            .find(query)
-            .send()
-            .await
-            .map_err(|_| AppointmentReadError::Unavailable)?;
-        if !response.status().is_success() {
-            return Err(AppointmentReadError::Unavailable);
-        }
-
-        response
-            .json()
-            .await
-            .map_err(|_| AppointmentReadError::InvalidData)
     }
 }

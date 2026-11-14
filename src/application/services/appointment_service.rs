@@ -3,18 +3,18 @@ use chrono_tz::America::El_Salvador;
 
 use crate::domain::{
     entities::appointment::Appointment,
-    repositories::{AppointmentReadError, AppointmentRepository},
+    repositories::{AppointmentRepository, RepositoryReadError},
 };
 
 pub enum ListAppointmentsError {
     InvalidDate,
-    Repository(AppointmentReadError),
+    Repository(RepositoryReadError),
 }
 
 pub async fn get_appointment(
     repository: &impl AppointmentRepository,
     id: &str,
-) -> Result<Option<Appointment>, AppointmentReadError> {
+) -> Result<Option<Appointment>, RepositoryReadError> {
     repository.find_by_id(id).await
 }
 

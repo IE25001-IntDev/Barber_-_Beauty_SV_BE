@@ -8,17 +8,17 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::{
     application::services::appointment_service::{
         ListAppointmentsError, get_appointment, list_appointments,
     },
-    domain::{entities::appointment::Appointment, repositories::AppointmentReadError},
+    domain::{entities::appointment::Appointment, repositories::RepositoryReadError},
     infrastructure::{
         database::couchdb::CouchDb,
         repositories::couchdb_appointment_repository::CouchDbAppointmentRepository,
     },
+    shared::errors::error_response,
 };
 
 #[derive(Deserialize)]
@@ -76,25 +76,17 @@ pub async fn get_by_id(
     }
 }
 
-fn repository_error(error: AppointmentReadError) -> Response {
+fn repository_error(error: RepositoryReadError) -> Response {
     match error {
-        AppointmentReadError::Unavailable => error_response(
+        RepositoryReadError::Unavailable => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "COUCHDB_NO_DISPONIBLE",
             "La API no puede acceder a la base de datos.",
         ),
-        AppointmentReadError::InvalidData => error_response(
+        RepositoryReadError::InvalidData => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "CITAS_NO_DISPONIBLES",
             "La API no pudo leer los datos de las citas.",
         ),
     }
-}
-
-fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
-    (
-        status,
-        Json(json!({"error": {"codigo": code, "mensaje": message}})),
-    )
-        .into_response()
 }

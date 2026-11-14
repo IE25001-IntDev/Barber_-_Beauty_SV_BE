@@ -2,7 +2,8 @@ use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use serde_json::{Value, json};
 
 use crate::{
-    infrastructure::database::couchdb::CouchDb, presentation::controllers::appointment_controller,
+    infrastructure::database::couchdb::CouchDb,
+    presentation::controllers::{appointment_controller, catalog_controller},
 };
 
 pub fn router(couchdb: CouchDb) -> Router {
@@ -11,6 +12,8 @@ pub fn router(couchdb: CouchDb) -> Router {
         .route("/api/ready", get(ready))
         .route("/api/citas", get(appointment_controller::list))
         .route("/api/citas/{id}", get(appointment_controller::get_by_id))
+        .route("/api/empleados", get(catalog_controller::list_employees))
+        .route("/api/servicios", get(catalog_controller::list_services))
         .with_state(couchdb)
 }
 
