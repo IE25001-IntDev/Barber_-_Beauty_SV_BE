@@ -128,8 +128,20 @@ mod tests {
             .with_state(state.clone());
         let (db_url, db_task) = serve(mock).await;
         let couch = CouchDb::new(&db_url, "test", "admin".into(), "secret".into()).unwrap();
-        let (api_url, api_task) = serve(routes::router(couch.clone(), 40)).await;
-        let client = reqwest::Client::new();
+        let auth = crate::presentation::auth::Auth::test_accounts();
+        let (api_url, api_task) = serve(routes::router(couch.clone(), 40, auth.clone())).await;
+        let anonymous = reqwest::Client::new();
+        assert_eq!(anonymous.get(format!("{api_url}/api/citas?fecha=2026-11-14")).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let session: Value = anonymous.post(format!("{api_url}/api/auth/login")).json(&json!({"usuario":"admin", "password":"test-password"})).send().await.unwrap().json().await.unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {}", session["token"].as_str().unwrap()).parse().unwrap());
+        let client = reqwest::Client::builder().default_headers(headers).build().unwrap();
+        let stylist: Value = anonymous.post(format!("{api_url}/api/auth/login")).json(&json!({"usuario":"ana", "password":"test-password"})).send().await.unwrap().json().await.unwrap();
+        let stylist_token = stylist["token"].as_str().unwrap();
+        assert_eq!(anonymous.get(format!("{api_url}/api/citas/cita-1")).bearer_auth(stylist_token).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(anonymous.put(format!("{api_url}/api/citas/cita-1")).bearer_auth(stylist_token).json(&json!({"estado":"cancelada"})).send().await.unwrap().status(), StatusCode::FORBIDDEN);
+        let filtered: Value = anonymous.get(format!("{api_url}/api/citas?fecha=2026-11-14")).bearer_auth(stylist_token).send().await.unwrap().json().await.unwrap();
+        assert_eq!(filtered["items"], json!([]));
         let endpoint = format!("{api_url}/api/citas/cita-1");
         let trace = json!({"estado":"completada", "op_id":"550e8400-e29b-41d4-a716-446655440000", "ts_cliente":1, "vu":1, "iteracion":1});
         let first = client.put(&endpoint).json(&trace).send().await.unwrap();
@@ -150,6 +162,10 @@ mod tests {
             StatusCode::OK
         );
         let original = state.lock().unwrap().commission.clone().unwrap();
+        let private: Value = anonymous.get(format!("{api_url}/api/comisiones?desde=2026-11-14&hasta=2099-11-14")).bearer_auth(stylist_token).send().await.unwrap().json().await.unwrap();
+        assert_eq!(private["items"], json!([]));
+        anonymous.post(format!("{api_url}/api/auth/logout")).bearer_auth(stylist_token).send().await.unwrap();
+        assert_eq!(anonymous.get(format!("{api_url}/api/citas?fecha=2026-11-14")).bearer_auth(stylist_token).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
         assert_eq!(original["monto_centavos"], 401);
         assert_eq!(original["porcentaje"], 40);
         assert_eq!(original["cita_id"], "cita-1");
@@ -161,7 +177,7 @@ mod tests {
                 .ends_with('Z')
         );
         // Reinicio con otra configuración y reintento sin trazabilidad.
-        let (second_url, second_task) = serve(routes::router(couch.clone(), 90)).await;
+        let (second_url, second_task) = serve(routes::router(couch.clone(), 90, auth)).await;
         assert_eq!(
             client
                 .put(format!("{second_url}/api/citas/cita-1"))

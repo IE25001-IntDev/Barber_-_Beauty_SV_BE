@@ -6,6 +6,7 @@ use std::{
 };
 
 pub struct Config {
+    pub auth_users_file: String,
     pub comision_porcentaje: u8,
     pub api_addr: SocketAddr,
     pub couchdb_url: String,
@@ -31,6 +32,7 @@ impl Config {
             parse_percentage(&value(&dotenv, "COMISION_PORCENTAJE", Some("40"))?)?;
 
         Ok(Self {
+            auth_users_file: value(&dotenv, "AUTH_USERS_FILE", Some(".auth-users.json"))?,
             comision_porcentaje,
             api_addr: SocketAddr::new(host, port),
             couchdb_url: value(&dotenv, "COUCHDB_URL", None)?,

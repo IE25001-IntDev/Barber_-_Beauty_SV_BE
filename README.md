@@ -214,3 +214,17 @@ Las citas completadas generan una comisión con `COMISION_PORCENTAJE` (entero en
 `GET /api/comisiones?desde=YYYY-MM-DD&hasta=YYYY-MM-DD`. Si falla el guardado de la
 comisión, reintenta el PUT de la cita con estado `completada`; la comisión existente
 se conserva. Ver los detalles y el redondeo en el contrato de API.
+
+## Usuarios y permisos del prototipo
+
+Antes del primer arranque: `cargo run --locked -- --crear-usuarios-demo`. Se crean `.auth-users.json` (hashes Argon2id) y `.auth-users.json.credenciales.txt` (claves aleatorias para la demostración), con permisos 600 en Unix y excluidos de Git. La orden se niega a reemplazar archivos existentes. `AUTH_USERS_FILE` permite señalar otro archivo de cuentas; conserva el esquema generado y asigna a cada estilista un ID de empleado existente. Reinicia la API después de editar las cuentas. No se crean automáticamente datos del catálogo al generar usuarios.
+
+Todas las rutas de negocio requieren `Authorization: Bearer <token>`. Obtén el token con `POST /api/auth/login`, JSON `{"usuario":"admin","password":"<clave local>"}`. `POST /api/auth/logout` lo revoca. Las sesiones duran ocho horas, viven en memoria y se invalidan al reiniciar la API o al iniciar otra sesión con la misma cuenta. Cinco intentos de acceso por cuenta/minuto y máximo dos verificaciones de contraseña simultáneas. `/api/health` y `/api/ready` siguen públicos para comprobar infraestructura.
+
+El administrador opera sobre todo el equipo; el estilista solo crea/consulta/modifica sus citas y ve sus propias comisiones. El listado de empleados de un estilista contiene únicamente su ID. Los permisos se verifican en los controladores antes de modificar datos; esconder botones no es la protección.
+
+`GET /api/mediciones` y `POST /api/mediciones` son exclusivos del administrador. El POST recibe `id` UUID v4, `fecha` AAAA-MM-DD, `fase` (`antes`/`despues`), `minutos_disponibles` (1–144000), `minutos_productivos` (0–disponibles) y `segundos_planilla` (0–86400). Guarda documentos `tipo: medicion`, ID `medicion:<uuid>`. Repetir un ID con el mismo contenido es idempotente; cambiarlo devuelve 409. Son observaciones capturadas manualmente, no resultados experimentales precargados.
+
+El laboratorio Compose monta `.auth-users.json` como solo lectura. Créalo antes de iniciar el laboratorio. Las pruebas de infraestructura siguen usando `/api/ready`; cualquier generador de operaciones de negocio debe autenticarse y enviar Bearer. La aplicación de operaciones replicadas sigue pendiente: esta modificación no convierte la replicación en ejecución de citas.
+
+Para este prototipo se usa una instancia Rust y datos ficticios. Antes de publicar para clientes reales: TLS delante de la API, cuenta CouchDB con privilegios mínimos, protección del almacenamiento local y manejo de sesiones compartidas si se despliegan varias instancias. No exponer CouchDB al navegador.

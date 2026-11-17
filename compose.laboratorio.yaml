@@ -24,6 +24,7 @@ services:
     image: debian:trixie-slim
     entrypoint: [/app/BD_Backend]
     environment:
+      AUTH_USERS_FILE: /app/auth-users.json
       API_HOST: "0.0.0.0"
       API_PORT: "18080"
       COUCHDB_URL: "http://couchdb:5984"
@@ -34,6 +35,12 @@ services:
       - type: bind
         source: ./target/debug/BD_Backend
         target: /app/BD_Backend
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.auth-users.json
+        target: /app/auth-users.json
         read_only: true
         bind:
           create_host_path: false

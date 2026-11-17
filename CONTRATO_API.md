@@ -140,3 +140,9 @@ si son inválidos devuelve 400 (`FECHA_INVALIDA`). El rango incluye ambos días 
 del día siguiente a `hasta`. Filtra por `fecha_generacion` y ordena por ella y por ID.
 Sin resultados devuelve `{"items":[]}`. Los errores de CouchDB usan los mismos
 códigos 503/500 descritos arriba.
+
+## Control de acceso y mediciones (17-11-2026)
+
+Las rutas de citas, empleados, servicios, comisiones y mediciones requieren un token Bearer obtenido mediante `POST /api/auth/login` (`usuario`, `password`). Respuesta: `{token, user: {usuario, nombre, rol, empleado_id}}`. `POST /api/auth/logout` invalida el token. Sin sesión válida: 401; acceso ajeno: 403; exceso de intentos de acceso: 429. La sesión no se renueva con cada petición y dura hasta ocho horas. Un nuevo acceso con la misma cuenta revoca su sesión anterior. Los listados de citas/comisiones se filtran en el servidor por empleado para el rol `estilista`; el administrador consulta todo el equipo.
+
+Mediciones: consultar `GET /api/mediciones` devuelve `{items: [...]}`. Registrar `POST /api/mediciones` recibe `{id, fecha, fase, minutos_disponibles, minutos_productivos, segundos_planilla}`. Solo administrador; valores enteros, fecha real, UUID v4, fase `antes`/`despues`, capacidad positiva y productividad entre cero y capacidad. Responde 201 al crear, 200 ante repetición idéntica, 409 si ese ID tiene otros valores, 422 si es inválido y 503 si no puede confirmar. Los clientes conservan el ID al reintentar.

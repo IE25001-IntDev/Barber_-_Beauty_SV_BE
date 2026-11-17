@@ -1,3 +1,5 @@
+use axum::Extension;
+use crate::presentation::auth::User;
 use crate::{
     application::services::commission_service::date_range,
     domain::repositories::{CommissionRepository, RepositoryReadError},
@@ -24,6 +26,7 @@ pub struct ListQuery {
 
 pub async fn list(
     State(db): State<CouchDb>,
+    Extension(user): Extension<User>,
     query: Result<Query<ListQuery>, QueryRejection>,
 ) -> Response {
     let range = query
@@ -40,7 +43,7 @@ pub async fn list(
         .list_generated_between(start, end)
         .await
     {
-        Ok(items) => Json(json!({"items": items})).into_response(),
+        Ok(items) => Json(json!({"items": items.into_iter().filter(|c| user.allows(&c.empleado_id)).collect::<Vec<_>>()})).into_response(),
         Err(error) => repository_error(error),
     }
 }

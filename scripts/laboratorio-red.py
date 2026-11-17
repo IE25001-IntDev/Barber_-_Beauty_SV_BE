@@ -546,6 +546,8 @@ def ejecutar_laboratorio(args):
         binario = RAIZ / "target/debug/BD_Backend"
         if not binario.is_file():
             raise RuntimeError("Compila primero el binario Linux con cargo build --locked.")
+        if not (RAIZ / ".auth-users.json").is_file():
+            raise RuntimeError("Crea las cuentas ficticias con cargo run -- --crear-usuarios-demo antes de iniciar el laboratorio.")
         preparar_entorno(".env", "COUCHDB_PASSWORD")
         preparar_entorno(".env.local", "COUCHDB_LOCAL_PASSWORD")
     servicios = servicios_compose(COMPOSE)

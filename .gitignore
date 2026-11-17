@@ -4,3 +4,5 @@
 
 /scripts/__pycache__/
 /resultados/bad215-lab/
+
+/.auth-users.json*

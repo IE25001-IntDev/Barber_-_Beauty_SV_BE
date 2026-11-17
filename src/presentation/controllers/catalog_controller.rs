@@ -1,3 +1,5 @@
+use axum::Extension;
+use crate::presentation::auth::User;
 use axum::{
     Json,
     extract::State,
@@ -20,8 +22,8 @@ struct CatalogList<T> {
     items: Vec<CatalogEntry<T>>,
 }
 
-pub async fn list_employees(State(couchdb): State<CouchDb>) -> Response {
-    catalog_response(CouchDbCatalogRepository(&couchdb).list_employees().await)
+pub async fn list_employees(State(couchdb): State<CouchDb>, Extension(user): Extension<User>) -> Response {
+    catalog_response(CouchDbCatalogRepository(&couchdb).list_employees().await.map(|items| items.into_iter().filter(|e| user.allows(&e.id)).collect()))
 }
 
 pub async fn list_services(State(couchdb): State<CouchDb>) -> Response {

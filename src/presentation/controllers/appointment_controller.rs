@@ -1,3 +1,4 @@
+use crate::presentation::auth::{User, forbidden};
 use axum::{
     Extension, Json,
     extract::{
@@ -42,6 +43,7 @@ struct AppointmentList {
 
 pub async fn list(
     State(couchdb): State<CouchDb>,
+    Extension(user): Extension<User>,
     query: Result<Query<ListAppointmentsQuery>, QueryRejection>,
 ) -> Response {
     let repository = CouchDbAppointmentRepository(&couchdb);
@@ -51,7 +53,7 @@ pub async fn list(
     };
 
     match result {
-        Ok(items) => Json(AppointmentList { items }).into_response(),
+        Ok(items) => Json(AppointmentList { items: items.into_iter().filter(|a| user.allows(&a.empleado_id)).collect() }).into_response(),
         Err(ListAppointmentsError::InvalidDate) => error_response(
             StatusCode::BAD_REQUEST,
             "FECHA_INVALIDA",
@@ -63,6 +65,7 @@ pub async fn list(
 
 pub async fn get_by_id(
     State(couchdb): State<CouchDb>,
+    Extension(user): Extension<User>,
     path: Result<Path<String>, PathRejection>,
 ) -> Response {
     let Ok(Path(id)) = path else {
@@ -71,7 +74,7 @@ pub async fn get_by_id(
 
     let repository = CouchDbAppointmentRepository(&couchdb);
     match get_appointment(&repository, &id).await {
-        Ok(Some(appointment)) => Json(appointment).into_response(),
+        Ok(Some(appointment)) => if user.allows(&appointment.empleado_id) { Json(appointment).into_response() } else { forbidden() },
         Ok(None) => not_found(),
         Err(error) => repository_error(error),
     }
@@ -94,6 +97,7 @@ fn repository_error(error: RepositoryReadError) -> Response {
 
 pub async fn create(
     State(couchdb): State<CouchDb>,
+    Extension(user): Extension<User>,
     Extension(creation_lock): Extension<Arc<Mutex<()>>>,
     body: Result<Json<NewAppointment>, JsonRejection>,
 ) -> Response {
@@ -103,6 +107,7 @@ pub async fn create(
     };
 
     let repository = CouchDbAppointmentRepository(&couchdb);
+    if !user.allows(&request.empleado_id) { return forbidden(); }
     let catalog = CouchDbCatalogRepository(&couchdb);
     // Serializa la lectura de disponibilidad y la inserción dentro de esta instancia.
     let result = {
@@ -150,6 +155,7 @@ pub async fn create(
 pub async fn update_status(
     Extension(percentage): Extension<u8>,
     State(couchdb): State<CouchDb>,
+    Extension(user): Extension<User>,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<AppointmentStatusChange>, JsonRejection>,
 ) -> Response {
@@ -162,6 +168,12 @@ pub async fn update_status(
     };
 
     let repository = CouchDbAppointmentRepository(&couchdb);
+    match get_appointment(&repository, &id).await {
+        Ok(Some(a)) if user.allows(&a.empleado_id) => {},
+        Ok(Some(_)) => return forbidden(),
+        Ok(None) => return not_found(),
+        Err(e) => return repository_error(e),
+    }
     match update_appointment_status(&repository, &crate::infrastructure::repositories::couchdb_commission_repository::CouchDbCommissionRepository(&couchdb), percentage, &id, request).await {
         Ok(appointment) => Json(appointment).into_response(),
         Err(UpdateAppointmentError::InvalidTrace) => invalid_trace(),
