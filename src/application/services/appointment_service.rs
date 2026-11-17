@@ -60,6 +60,7 @@ pub(super) fn start_of_day(day: NaiveDate) -> Option<chrono::DateTime<Utc>> {
 }
 
 pub enum CreateAppointmentError {
+    PastStart,
     InvalidFields,
     InvalidTrace,
     EmployeeUnavailable,
@@ -109,6 +110,9 @@ pub async fn create_appointment(
         return Err(CreateAppointmentError::Conflict);
     }
 
+    // Reconocer primero los reintentos ya guardados, aunque su horario haya pasado.
+    validate_start(request.inicio, std::time::SystemTime::now().into())?;
+
     catalog
         .find_employee(&request.empleado_id)
         .await
@@ -154,6 +158,23 @@ pub async fn create_appointment(
             .map_err(insert_error)?
             .ok_or(CreateAppointmentError::Conflict),
         (result, _) => result.map_err(insert_error),
+    }
+}
+
+fn validate_start(start: DateTime<Utc>, now: DateTime<Utc>) -> Result<(), CreateAppointmentError> {
+    if start <= now { Err(CreateAppointmentError::PastStart) } else { Ok(()) }
+}
+
+#[cfg(test)]
+mod booking_time_tests {
+    use super::*;
+    #[test]
+    fn rejects_past_and_current_start_across_local_midnight() {
+        let now = DateTime::parse_from_rfc3339("2026-11-18T05:59:00Z").unwrap().with_timezone(&Utc);
+        for start in ["2026-11-17T23:58:00-06:00", "2026-11-17T23:59:00-06:00", "2026-11-16T12:00:00-06:00"] {
+            assert!(matches!(validate_start(DateTime::parse_from_rfc3339(start).unwrap().with_timezone(&Utc), now), Err(CreateAppointmentError::PastStart)));
+        }
+        assert!(validate_start(DateTime::parse_from_rfc3339("2026-11-18T00:00:00-06:00").unwrap().with_timezone(&Utc), now).is_ok());
     }
 }
 

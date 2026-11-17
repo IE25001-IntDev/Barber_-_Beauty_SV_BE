@@ -122,6 +122,11 @@ pub async fn create(
             "CITA_INVALIDA",
             "Envía un UUID v4 para la cita y valores no vacíos para cliente, empleado y servicio.",
         ),
+        Err(CreateAppointmentError::PastStart) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "HORARIO_PASADO",
+            "Elige una fecha y hora futuras. No se pueden reservar citas en el pasado.",
+        ),
         Err(CreateAppointmentError::InvalidTrace) => return invalid_trace(),
         Err(CreateAppointmentError::EmployeeUnavailable) => (
             StatusCode::UNPROCESSABLE_ENTITY,
